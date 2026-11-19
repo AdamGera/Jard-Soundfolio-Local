@@ -1,4 +1,4 @@
-class RumbleCapture extends AudioWorkletProcessor {
+class SoundfolioCapture extends AudioWorkletProcessor {
   constructor() {
     super()
     this.buffer = new Float32Array(Math.round(sampleRate / 12))
@@ -30,4 +30,4 @@ class RumbleCapture extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("rumble-capture", RumbleCapture)
+registerProcessor("soundfolio-capture", SoundfolioCapture)

@@ -1,5 +1,5 @@
 {
-  "name": "rumble-demo",
+  "name": "jard-soundfolio-local",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -43,5 +43,13 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8",
     "vite": "^8"
+  },
+  "description": "Your recordings, transcripts, and notes stay on your Mac.",
+  "author": "Jard (https://www.jard.ai/)",
+  "license": "Apache-2.0",
+  "homepage": "https://www.jard.ai/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AdamGera/Soundfolio-Local.git"
   }
 }

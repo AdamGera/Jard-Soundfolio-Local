@@ -94,12 +94,12 @@
   }
 }
 
-.rumble-shell {
+.soundfolio-shell {
   min-height: 100svh;
   background: radial-gradient(ellipse 46rem 22rem at 50% 78%, var(--halo), transparent);
 }
 
-.rumble-header {
+.soundfolio-header {
   max-width: 69rem;
   margin: 0 auto;
   padding: 1.75rem 2.5rem;
@@ -602,7 +602,7 @@
 
 
 @media (max-width: 560px) {
-  .rumble-header { padding: 1.3rem 1.25rem; }
+  .soundfolio-header { padding: 1.3rem 1.25rem; }
   .workspace { width: calc(100% - 2rem); }
   .transcript-panel { --header-height: 4.25rem; border-radius: 1.5rem; }
   .panel-heading { padding-inline: 1.25rem; }
@@ -665,17 +665,17 @@
 
 /* Saved sessions use the window as a document, with a shared bottom dock. */
 .workspace-actions { display: flex; align-items: center; gap: .25rem; color: var(--quiet); }
-.rumble-shell[data-session="true"] {
+.soundfolio-shell[data-session="true"] {
   --reading-width: 46rem;
   --page-gutter: clamp(1rem, 4vw, 2.7rem);
   height: 100dvh; min-height: 0; display: flex; flex-direction: column; background: var(--surface);
 }
-.rumble-shell[data-session="true"] .rumble-header {
+.soundfolio-shell[data-session="true"] .soundfolio-header {
   width: 100%; max-width: none; margin: 0; flex: none;
   padding: max(.55rem, env(safe-area-inset-top)) max(var(--page-gutter), env(safe-area-inset-right)) .55rem max(var(--page-gutter), env(safe-area-inset-left));
 }
-.rumble-shell[data-session="true"] .wordmark-icon { width: 1.8rem; height: 1.8rem; }
-.rumble-shell[data-session="true"] .wordmark { gap: .45rem; font-size: .94rem; }
+.soundfolio-shell[data-session="true"] .wordmark-icon { width: 1.8rem; height: 1.8rem; }
+.soundfolio-shell[data-session="true"] .wordmark { gap: .45rem; font-size: .94rem; }
 .workspace[data-session="true"] {
   width: 100%; min-height: 0; flex: 1; display: flex; flex-direction: column; padding: 0; margin: 0;
 }
@@ -834,7 +834,7 @@
 .chat-error { color: var(--recording-ink); font-size: .82rem; }
 .jump-latest[data-slot] { position: absolute; z-index: 1; bottom: .4rem; left: 50%; transform: translateX(-50%); border-radius: 50%; background: var(--surface); }
 @media (max-width: 600px) {
-  .rumble-shell[data-session="true"] .workspace-actions > [aria-label="New session"] span { display: none; }
+  .soundfolio-shell[data-session="true"] .workspace-actions > [aria-label="New session"] span { display: none; }
   .workspace-actions { gap: 0; }
   .workspace-actions > [aria-label="New session"] { padding-inline: .5rem; }
   .compact-downloads { margin: 0; padding-inline-end: .2rem; }
@@ -904,7 +904,7 @@
   .transcript-find, .session-dock .audio-launcher, .session-dock .chat-launcher, .chat-composer { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
-.rumble-shell[data-session="true"] .rumble-header {
+.soundfolio-shell[data-session="true"] .soundfolio-header {
   padding-block: max(.15rem, env(safe-area-inset-top)) .15rem;
 }
 .session-heading {

@@ -40,7 +40,7 @@ export async function openMicrophone(
   onEnded: () => void,
 ): Promise<Microphone> {
   if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode || !window.MediaRecorder) {
-    throw new Error("Open Jard Audio in Safari or Chrome to use the microphone.")
+    throw new Error("Open Jard Soundfolio Local in Safari or Chrome to use the microphone.")
   }
 
   const context = new AudioContext()
@@ -53,7 +53,7 @@ export async function openMicrophone(
     stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } })
     await context.audioWorklet.addModule("/capture-worklet.js")
     source = context.createMediaStreamSource(stream)
-    worklet = new AudioWorkletNode(context, "rumble-capture", {
+    worklet = new AudioWorkletNode(context, "soundfolio-capture", {
       channelCount: 1,
       channelCountMode: "explicit",
     })
@@ -210,7 +210,7 @@ async function sendAudio(
     body: audio,
     signal,
   }).catch(() => {
-    throw new Error("Jard Audio disconnected. Open Start Jard Audio and try again.")
+    throw new Error("Jard Soundfolio Local disconnected. Open Start Jard Soundfolio Local and try again.")
   })
   if (!response.ok) {
     const result = await response.json()
@@ -246,11 +246,11 @@ export async function transcribeMedia(
   if (!audio.size) throw new Error("The audio is empty.")
   const response = await sendAudio("/api/transcribe-file", audio, languages, options)
   const reader = response.body?.getReader()
-  if (!reader) throw new Error("Jard Audio could not read the transcription response.")
+  if (!reader) throw new Error("Jard Soundfolio Local could not read the transcription response.")
 
   const decoder = new TextDecoder()
   const id = response.headers.get("X-Session-ID")
-  if (!id) throw new Error("Jard Audio could not save the session. Restart the local launcher.")
+  if (!id) throw new Error("Jard Soundfolio Local could not save the session. Restart the local launcher.")
   onSaved?.(id)
   let pending = ""
   try {

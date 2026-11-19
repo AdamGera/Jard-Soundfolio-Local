@@ -34,7 +34,7 @@ class ChatQuestion(BaseModel):
 def check_origin(request):
     origin = request.headers.get("origin")
     if origin and origin != str(request.base_url).rstrip("/"):
-        raise HTTPException(403, "Open Jard Audio from its local launcher.")
+        raise HTTPException(403, "Open Jard Soundfolio Local from its local launcher.")
 
 
 def session_status(db, key):
@@ -251,7 +251,7 @@ async def ask_chat(key: UUID, body: ChatQuestion, request: Request):
             raise
         except Exception as exc:
             status = "error"
-            if isinstance(exc, RuntimeError) and str(exc).startswith(("Run Setup Jard Audio", "Local writing model")):
+            if isinstance(exc, RuntimeError) and str(exc).startswith(("Run Setup Jard Soundfolio Local", "Local writing model")):
                 reason = str(exc)
             elif isinstance(exc, ValueError) and str(exc).startswith("Please shorten the question"):
                 reason = str(exc)

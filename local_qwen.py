@@ -1,4 +1,4 @@
-"""Pinned offline text inference for Jard Audio. A private Unix socket carries transcript text."""
+"""Pinned offline text inference for Jard Soundfolio Local. A private Unix socket carries transcript text."""
 import asyncio
 import hashlib
 import json
@@ -134,7 +134,7 @@ class LocalQwen:
         if self.process and self.process.returncode is None and self.healthy:
             return
         if not SERVER.is_file() or not WEIGHTS.is_file():
-            raise RuntimeError("Run Setup Jard Audio to install the local writing model.")
+            raise RuntimeError("Run Setup Jard Soundfolio Local to install the local writing model.")
         if self.process is None or self.process.returncode is not None:
             self.healthy = False
             Path(self.socket).unlink(missing_ok=True)

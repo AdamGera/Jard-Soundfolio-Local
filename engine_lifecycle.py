@@ -72,18 +72,18 @@ def running_engine():
         if info.get("model") != "Reson8/Rumble-2-Flash":
             raise ValueError("unexpected server")
     except (OSError, URLError, ValueError, AttributeError) as error:
-        raise RuntimeError(f"Another application is using {URL}. Close it and reopen Jard Audio.") from error
+        raise RuntimeError(f"Another application is using {URL}. Close it and reopen Jard Soundfolio Local.") from error
     if info.get("apiVersion") != API_VERSION:
-        raise RuntimeError("Another Jard Audio version is running. Quit it, then reopen Jard Audio.")
+        raise RuntimeError("Another Jard Soundfolio Local version is running. Quit it, then reopen Jard Soundfolio Local.")
     root = library_path()
     if info.get("libraryId") != library_id(root):
-        raise RuntimeError("The running Jard Audio engine is using a different session library.")
+        raise RuntimeError("The running Jard Soundfolio Local engine is using a different session library.")
     try:
         token = (root / ".native-token").read_text().strip()
     except OSError as error:
-        raise RuntimeError("Could not verify the running Jard Audio engine.") from error
+        raise RuntimeError("Could not verify the running Jard Soundfolio Local engine.") from error
     if not hmac.compare_digest(info.get("proof", ""), engine_proof(token, challenge)):
-        raise RuntimeError("Could not verify the running Jard Audio engine.")
+        raise RuntimeError("Could not verify the running Jard Soundfolio Local engine.")
     return info
 
 

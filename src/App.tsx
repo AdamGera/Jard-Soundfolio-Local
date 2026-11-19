@@ -46,7 +46,7 @@ function message(error: unknown) {
 export default function App() {
   const [quitting, setQuitting] = useState(false)
   return quitting
-    ? <main className="quit-screen" role="status"><h1>Jard Audio is shutting down.</h1><p>You can close this tab.</p></main>
+    ? <main className="quit-screen" role="status"><h1>Jard Soundfolio Local is shutting down.</h1><p>You can close this tab.</p></main>
     : <Workspace onQuit={() => setQuitting(true)} />
 }
 
@@ -81,7 +81,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     async function check() {
       try {
         const response = await fetch("/api/status", { cache: "no-store", signal: abort.signal })
-        if (!response.ok) throw new Error("Jard Audio is unavailable.")
+        if (!response.ok) throw new Error("Jard Soundfolio Local is unavailable.")
         const update: { status: ModelStatus; languages?: Language[]; diarization?: boolean } = await response.json()
         if (abort.signal.aborted) return
         if (update.status === "ready" && update.languages) setLanguageOptions(update.languages)
@@ -374,14 +374,14 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   }
 
   return (
-    <div className="rumble-shell" data-session={viewingSession}>
-      <header className="rumble-header">
+    <div className="soundfolio-shell" data-session={viewingSession}>
+      <header className="soundfolio-header">
         <div className="wordmark">
           <picture>
             <source media="(prefers-color-scheme: dark)" srcSet="/jard-dark.png" />
             <img className="wordmark-icon" src="/jard-light.png" width="40" height="40" alt="" />
           </picture>
-          Jard Audio
+          Jard Soundfolio Local
         </div>
         <nav className="workspace-actions" aria-label="Session actions">
           {viewingSession && <>
@@ -447,10 +447,11 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
               </span>
             )}
             {recording && <span>{recordingActivity}</span>}
+            {canStart && !recording && <span>Your recordings, transcripts, and notes stay on your Mac.</span>}
           </div>
           {(feedback || status === "error") && (
             <p className="feedback" role="alert">
-              {feedback || "Jard Audio could not start. Check the launcher, then reload this page."}
+              {feedback || "Jard Soundfolio Local could not start. Check the launcher, then reload this page."}
             </p>
           )}
           <div className="transcription-options">

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-  <title>Welcome to Jard Audio</title>
+  <title>Welcome to Jard Soundfolio Local</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -31,6 +31,7 @@
     article p, details, #status { font-size: 13px; }
     button { font: inherit; font-size: 13px; font-weight: 600; color: var(--text); background: var(--button); border: 1px solid var(--line); cursor: pointer; border-radius: 100px; padding: 8px 15px; min-width: 76px; }
     button.primary { color: var(--ink); background: var(--tint); border-color: transparent; }
+    a { color: inherit; }
     button:hover { filter: brightness(.95); }
     :focus-visible { outline: 2px solid #9682c9; outline-offset: 3px; }
     details { color: var(--muted); margin: 14px 4px; }
@@ -42,10 +43,10 @@
 </head>
 <body>
   <main>
-    <div class="brand"><picture><source media="(prefers-color-scheme: dark)" srcset="public/jard-dark.png"><img src="public/jard-light.png" alt="" width="28" height="28"></picture>Jard Audio</div>
+    <div class="brand"><picture><source media="(prefers-color-scheme: dark)" srcset="public/jard-dark.png"><img src="public/jard-light.png" alt="" width="28" height="28"></picture>Jard Soundfolio Local</div>
     <header>
-      <h1>Your audio, on your Mac.</h1>
-      <p>Record a conversation or open an audio file. Read who said what, jump to a moment, or ask a question about the transcript. Everything runs locally.</p>
+      <h1>Your recordings, transcripts, and notes stay on your Mac.</h1>
+      <p>Record a conversation or open an audio file. Read who said what, jump to a moment, or ask a question about the transcript. Built by <a href="https://www.jard.ai/">Jard</a> and free to use.</p>
     </header>
     <section class="actions" aria-label="App controls">
       <article>
@@ -53,7 +54,7 @@
         <button class="primary" data-action="setup">Set up</button>
       </article>
       <article>
-        <div><h2>Open your workspace</h2><p>Start Jard Audio in your browser or return to the app if it’s already running.</p></div>
+        <div><h2>Open your workspace</h2><p>Start Jard Soundfolio Local in your browser or return to the app if it’s already running.</p></div>
         <button data-action="start">Start</button>
       </article>
       <article>
@@ -62,14 +63,14 @@
       </article>
     </section>
     <p id="status" role="status"></p>
-    <details><summary>What do I need for setup?</summary><p>Use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Setup needs internet access to install dependencies and download the models. After Terminal shows “Ready,” choose Start. Future sessions work offline.</p><p>If your browser asks to open Jard Audio Launcher, choose Open. On a fresh Mac, opening Jard Audio Launcher.app once in Finder registers the buttons with macOS.</p></details>
+    <details><summary>What do I need for setup?</summary><p>Use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Setup needs internet access to install dependencies and download the models. After Terminal shows “Ready,” choose Start. Future sessions work offline.</p><p>If your browser asks to open Jard Soundfolio Local Launcher, choose Open. On a fresh Mac, opening Jard Soundfolio Local Launcher.app once in Finder registers the buttons with macOS.</p></details>
   </main>
   <script>
     for (const button of document.querySelectorAll('[data-action]')) {
       button.addEventListener('click', () => {
         const page = encodeURIComponent(decodeURIComponent(location.pathname))
         document.getElementById('status').textContent = 'Opening ' + button.textContent + ' in Terminal…'
-        location.href = 'jard-audio://' + button.dataset.action + '?page=' + page
+        location.href = 'jard-soundfolio-local://' + button.dataset.action + '?page=' + page
       })
     }
   </script>

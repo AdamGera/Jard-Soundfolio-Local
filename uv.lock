@@ -665,7 +665,7 @@ wheels = [
 ]
 
 [[package]]
-name = "rumble-demo"
+name = "jard-soundfolio-local"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -12,7 +12,7 @@
 - (void)showError:(NSString *)message {
     [NSApp activateIgnoringOtherApps:YES];
     NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Jard Audio Launcher";
+    alert.messageText = @"Jard Soundfolio Local Launcher";
     alert.informativeText = message;
     [alert runModal];
 }
@@ -20,28 +20,29 @@
 - (BOOL)applicationOpenUntitledFile:(NSApplication *)sender {
     NSURL *page = [self.folder URLByAppendingPathComponent:@"README.html"];
     if (![NSWorkspace.sharedWorkspace openURL:page]) {
-        [self showError:@"Keep Jard Audio Launcher in the same folder as README.html."];
+        [self showError:@"Keep Jard Soundfolio Local Launcher in the same folder as README.html."];
     }
     [NSApp terminate:nil];
     return YES;
 }
 
 - (void)application:(NSApplication *)sender openURLs:(NSArray<NSURL *> *)urls {
-    NSDictionary *commands = @{@"setup": @"Setup Jard Audio.command",
-                               @"start": @"Start Jard Audio.command",
-                               @"quit": @"Quit Jard Audio.command"};
+    NSDictionary *commands = @{@"setup": @"Setup Jard Soundfolio Local.command",
+                               @"start": @"Start Jard Soundfolio Local.command",
+                               @"quit": @"Quit Jard Soundfolio Local.command"};
     NSString *page = [[self.folder URLByAppendingPathComponent:@"README.html"] URLByResolvingSymlinksInPath].path;
     for (NSURL *url in urls) {
         NSURLComponents *parts = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
         NSString *command = parts.host ? commands[parts.host] : nil;
-        if (![parts.scheme isEqualToString:@"jard-audio"] || !command) continue;
+        BOOL knownScheme = [parts.scheme isEqualToString:@"jard-soundfolio-local"] || [parts.scheme isEqualToString:@"jard-audio"];
+        if (!knownScheme || !command) continue;
         NSURLQueryItem *source = parts.queryItems.firstObject;
         // A link from a different checkout must never run this checkout's commands.
         BOOL fromPage = [source.name isEqualToString:@"page"] &&
             [source.value.stringByResolvingSymlinksInPath.precomposedStringWithCanonicalMapping
                 isEqualToString:page.precomposedStringWithCanonicalMapping];
         if (!fromPage) {
-            [self showError:@"Open Jard Audio Launcher in the same folder as your welcome page."];
+            [self showError:@"Open Jard Soundfolio Local Launcher in the same folder as your welcome page."];
             break;
         }
         NSURL *file = [self.folder URLByAppendingPathComponent:command];

@@ -53,7 +53,7 @@ export function OverviewLanguage({ value, detected, onSelect }: {
           onCloseAutoFocus={event => { event.preventDefault(); trigger.current?.focus({ preventScroll: true }) }}>
           <Dialog.Title>{pending?.code === "auto" ? "Use the detected language?" : `Switch to ${pending?.name ?? ""}?`}</Dialog.Title>
           <Dialog.Description>
-            Jard Audio will open the saved overview and timeline in this language, or generate them locally if needed.
+            Jard Soundfolio Local will open the saved overview and timeline in this language, or generate them locally if needed.
           </Dialog.Description>
           <div className="note-language-actions">
             <Dialog.Close asChild><Button ref={cancel} size="sm" variant="outline">Cancel</Button></Dialog.Close>

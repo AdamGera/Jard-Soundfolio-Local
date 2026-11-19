@@ -14,7 +14,8 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
       const response = await fetch("/api/quit", { method: "POST", headers: { "X-Jard-Action": "quit" } })
       if (response.status === 405 || response.status === 404) {
         // An already-running older server can serve the new UI before its next restart.
-        window.location.href = "jard-audio://quit?page=" + encodeURIComponent(import.meta.env.JARD_WELCOME_PAGE)
+        if (!import.meta.env.JARD_WELCOME_PAGE) throw new Error("Quit the older server using its Quit Jard Soundfolio Local.command in Finder.")
+        window.location.href = "jard-soundfolio-local://quit?page=" + encodeURIComponent(import.meta.env.JARD_WELCOME_PAGE)
         for (let attempt = 0; attempt < 12; attempt++) {
           await new Promise(resolve => setTimeout(resolve, 500))
           try {
@@ -23,26 +24,26 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
             if (reason instanceof TypeError) { onQuit(); return }
           }
         }
-        throw new Error("Jard Audio is still running. Allow the browser to open Jard Audio Launcher, then try again.")
+        throw new Error("Jard Soundfolio Local is still running. Allow the browser to open Jard Soundfolio Local Launcher, then try again.")
       }
-      if (!response.ok) throw new Error("Jard Audio could not quit. Try again.")
+      if (!response.ok) throw new Error("Jard Soundfolio Local could not quit. Try again.")
       onQuit()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not reach Jard Audio.")
+      setError(reason instanceof Error ? reason.message : "Could not reach Jard Soundfolio Local.")
       setBusy(false)
     }
   }
 
   return <AlertDialog.Root onOpenChange={() => setError("")}>
     <AlertDialog.Trigger asChild>
-      <Button size="icon-sm" variant="ghost" title="Quit Jard Audio" aria-label="Quit Jard Audio"><Power /></Button>
+      <Button size="icon-sm" variant="ghost" title="Quit Jard Soundfolio Local" aria-label="Quit Jard Soundfolio Local"><Power /></Button>
     </AlertDialog.Trigger>
     <AlertDialog.Portal>
       <AlertDialog.Overlay className="note-language-scrim" />
       <AlertDialog.Content className="note-language-confirm" onEscapeKeyDown={event => { if (busy) event.preventDefault() }}>
         <AlertDialog.Title>Are you sure?</AlertDialog.Title>
         <AlertDialog.Description>
-          {recording ? "Quitting will discard the current recording." : "Quit Jard Audio and stop local processing? Your saved sessions will be here next time."}
+          {recording ? "Quitting will discard the current recording." : "Quit Jard Soundfolio Local and stop local processing? Your saved sessions will be here next time."}
         </AlertDialog.Description>
         {error && <p role="alert">{error}</p>}
         <div className="note-language-actions">

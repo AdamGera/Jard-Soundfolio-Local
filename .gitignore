@@ -25,3 +25,28 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Native build products and downloaded build toolchains
+/desktop/.build/
+/desktop/.native/
+/desktop/.zig-cache/
+/desktop/zig-out/
+/desktop/out/
+
+# Local configuration, engine state, and private recording libraries
+.env
+.env.*
+!.env.example
+.native-token*
+*.sqlite3
+*.sqlite3-*
+/audio/
+/recordings/
+/sessions/
+/staging/
+*.wav
+*.m4a
+*.mp3
+*.webm
+*.p12
+*.p8

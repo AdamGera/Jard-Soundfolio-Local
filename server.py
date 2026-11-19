@@ -56,11 +56,11 @@ async def load_model(app: FastAPI):
 
             app.state.diarizer = await run_in_threadpool(Diarizer)
         except Exception:
-            logger.exception("Speaker labeling could not start. Run Setup Jard Audio to install its models.")
+            logger.exception("Speaker labeling could not start. Run Setup Jard Soundfolio Local to install its models.")
         try:
             await run_in_threadpool(app.state.model.enable_alignment)
         except Exception:
-            logger.exception("Word timing could not start. Run Setup Jard Audio to install alignment weights.")
+            logger.exception("Word timing could not start. Run Setup Jard Soundfolio Local to install alignment weights.")
         app.state.status = "ready"
 
 
@@ -106,7 +106,7 @@ async def status(request: Request):
 @app.post("/api/quit")
 async def quit_app(request: Request):
     if request.headers.get("origin") != URL or request.headers.get("x-jard-action") != "quit":
-        raise HTTPException(403, "Quit from the local Jard Audio app.")
+        raise HTTPException(403, "Quit from the local Jard Soundfolio Local app.")
     return Response(status_code=202, background=BackgroundTask(os.kill, os.getpid(), signal.SIGTERM))
 
 
@@ -137,7 +137,7 @@ def session_audio(request: Request, key: UUID):
 @app.delete("/api/sessions/{key}")
 def delete_session(request: Request, key: UUID):
     if request.headers.get("origin", URL) != URL:
-        raise HTTPException(403, "Open Jard Audio from its local launcher.")
+        raise HTTPException(403, "Open Jard Soundfolio Local from its local launcher.")
     try:
         request.app.state.library.delete(str(key))
     except ValueError as error:
@@ -147,7 +147,7 @@ def delete_session(request: Request, key: UUID):
 
 def check_audio_request(request: Request):
     if request.headers.get("origin", URL) != URL:
-        raise HTTPException(403, "Open Jard Audio from its local launcher.")
+        raise HTTPException(403, "Open Jard Soundfolio Local from its local launcher.")
     if request.headers.get("content-type") != "application/octet-stream":
         raise HTTPException(415, "Expected audio bytes.")
 
@@ -253,7 +253,7 @@ async def save_upload(request: Request, source: Path):
 @app.post("/api/playback")
 async def playback(request: Request, saved: UUID | None = None):
     check_audio_request(request)
-    folder = tempfile.TemporaryDirectory(prefix="rumble-player-")
+    folder = tempfile.TemporaryDirectory(prefix="soundfolio-player-")
     source = Path(folder.name) / "source"
     target = source.with_suffix(".m4a")
     try:
@@ -353,7 +353,7 @@ async def transcribe_file(
             request.app.state.insights.wake.set()
             emit(done=True, duration=samples / SAMPLE_RATE)
         except asyncio.CancelledError:
-            library.finish(key, "Processing stopped when Jard Audio closed.")
+            library.finish(key, "Processing stopped when Jard Soundfolio Local closed.")
             raise
         except Exception as error:
             logger.exception("Could not complete session %s.", key)
@@ -402,7 +402,7 @@ def open_browser():
 
 
 def start_in_background(*, open_page: bool):
-    directory = Path.home() / "Library/Logs/Jard Audio"
+    directory = Path.home() / "Library/Logs/Jard Soundfolio Local"
     directory.mkdir(parents=True, exist_ok=True)
     log = directory / "server.log"
     with log.open("a") as output:
@@ -412,15 +412,15 @@ def start_in_background(*, open_page: bool):
         )
     while running_server_version() != API_VERSION:
         if process.poll() is not None:
-            raise SystemExit(f"Jard Audio could not start. See {log}")
+            raise SystemExit(f"Jard Soundfolio Local could not start. See {log}")
         time.sleep(0.15)
     if open_page:
         webbrowser.open(URL)
-    print("Jard Audio is running. Double-click Quit Jard Audio to stop it.")
+    print("Jard Soundfolio Local is running. Double-click Quit Jard Soundfolio Local to stop it.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Jard Audio locally.")
+    parser = argparse.ArgumentParser(description="Run Jard Soundfolio Local locally.")
     parser.add_argument("--setup-model", action="store_true")
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--background", action="store_true", help="Start a detached server and open the browser.")
@@ -430,7 +430,7 @@ def main():
         prepare_model()
         return
     if not (DIST / "index.html").is_file():
-        parser.error("Run Setup Jard Audio to build the browser interface.")
+        parser.error("Run Setup Jard Soundfolio Local to build the browser interface.")
 
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -440,7 +440,7 @@ def main():
     running = running_server_version()
     if running is not None:
         if running != API_VERSION:
-            parser.exit(1, "An older Jard Audio server is running. Run Quit Jard Audio, then open Start Jard Audio to use this version.\n")
+            parser.exit(1, "An older Jard Soundfolio Local server is running. Run Quit Jard Soundfolio Local, then open Start Jard Soundfolio Local to use this version.\n")
         if not args.no_open:
             webbrowser.open(URL)
         return

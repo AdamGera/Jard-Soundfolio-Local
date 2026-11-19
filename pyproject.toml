@@ -1,6 +1,9 @@
 [project]
-name = "rumble-demo"
+name = "jard-soundfolio-local"
 version = "0.1.0"
+description = "Your recordings, transcripts, and notes stay on your Mac."
+license = "Apache-2.0"
+authors = [{ name = "Jard" }]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi==0.165.0",
@@ -9,3 +12,7 @@ dependencies = [
     "transformers==5.23.0",
     "uvicorn==0.54.0",
 ]
+
+[project.urls]
+Homepage = "https://www.jard.ai/"
+Repository = "https://github.com/AdamGera/Soundfolio-Local"
