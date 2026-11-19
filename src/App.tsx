@@ -54,6 +54,7 @@ export default function App() {
 }
 
 function Workspace({ onQuit }: { onQuit: () => void }) {
+  const [dictating, setDictating] = useState(false)
   const [status, setStatus] = useState<ModelStatus>("loading")
   const [phase, setPhase] = useState<Phase>("idle")
   const [languageOptions, setLanguageOptions] = useState<Language[]>([])
@@ -155,7 +156,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
 
   const recording = phase === "recording"
   const busy = phase === "starting" || phase === "transcribing"
-  const canStart = status === "ready" && phase === "idle" && !restoring && !choosingFile
+  const canStart = status === "ready" && phase === "idle" && !restoring && !choosingFile && !dictating
   const preparingModel = status === "loading"
   const processingSavedAudio = phase === "idle" && current?.saved?.status === "processing"
   const working = busy || restoring || preparingModel || processingSavedAudio
@@ -205,6 +206,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   }
 
   const receiveCapture = useEffectEvent((event: DesktopCaptureEvent) => {
+    if (event.dictation) return
     deviceRevision.current++
     switch (event.event) {
       case "started":
@@ -273,7 +275,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         if (disposed || deviceRevision.current !== revision) return
         if (devices.microphone) setMicrophoneName(devices.microphone)
         setRecoveredAudio(devices.drafts ?? [])
-        if (devices.capture && !nativeStopping.current) {
+        if (devices.capture && !devices.capture.dictation && !nativeStopping.current) {
           nativeCapture.current = true
           setMode(devices.capture.mode)
           setLive(devices.capture.live)
@@ -636,7 +638,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
 
   return (
     <SessionLibrary settings={native && <RecordingAccessSettings native={native} access={recordingAccess} refusedSource={refusedSource} />}
-      busy={phase !== "idle" || restoring} currentId={current?.id}
+      busy={phase !== "idle" || restoring || dictating} currentId={current?.id}
       onHome={newSession} onSelect={openSaved} onDelete={id => {
         if (current?.id !== id && readSessionRoute().id !== id) return
         restoreRequest.current?.abort()
@@ -655,8 +657,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         </div>
         <nav className="workspace-actions" aria-label="Session actions">
           {viewingSession && <Downloads item={current} compact />}
-          <Button size="sm" variant="ghost" disabled={phase !== "idle" || restoring} onClick={newSession} title="New session" aria-label="New session"><Plus /><span>New session</span></Button>
-          <QuitButton recording={recording || phase === "starting"} onQuit={onQuit} />
+          <Button size="sm" variant="ghost" disabled={phase !== "idle" || restoring || dictating} onClick={newSession} title="New session" aria-label="New session"><Plus /><span>New session</span></Button>
+          <QuitButton recording={recording || phase === "starting" || dictating} onQuit={onQuit} />
         </nav>
       </header>
 
@@ -664,6 +666,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         <ResultsPanel key={phase === "idle" && current ? current.id : "capture"}
           session={phase === "idle" ? current?.saved : undefined} result={result} source={phase === "idle" && current ? current.audioUrl ?? current.audio ?? null : null}
           tab={tab} onTab={changeTab} working={working} recording={recording}
+          dictationEnabled={status === "ready" && phase === "idle" && !choosingFile}
+          onDictationBusy={setDictating}
           emptyText={emptyText} progress={processingIndicator} copied={copied} onCopy={() => void copyTranscript()} />
 
         {viewingSession && feedback && <p className="session-feedback feedback" role="alert">{feedback}</p>}

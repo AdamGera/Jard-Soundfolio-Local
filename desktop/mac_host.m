@@ -225,7 +225,7 @@
         return;
     }
     NSArray *commands = self.showingApp
-        ? @[@"jard.devices", @"jard.record", @"jard.stop", @"jard.live", @"jard.openAudio", @"jard.export", @"jard.recover", @"jard.discard", @"jard.open"]
+        ? @[@"jard.devices", @"jard.record", @"jard.stop", @"jard.dictation", @"jard.live", @"jard.openAudio", @"jard.export", @"jard.recover", @"jard.discard", @"jard.open"]
         : @[@"jard.prepare", @"jard.setup"];
     if (![origin isEqual:(self.showingApp ? self.origin : @"zero://inline")] || ![commands containsObject:command]) {
         [self reject:request reason:@"This command is unavailable in this view."];

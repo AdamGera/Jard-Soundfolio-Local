@@ -12,8 +12,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from session_notes import LANGUAGES, RegenerationConflict, initialize, selection
+from session_notes import LANGUAGES, RegenerationConflict, edit_overview, initialize, selection
 import chat_context
+import personal_notes
 import writing_cache
 from session_store import MissingSession
 
@@ -24,7 +25,15 @@ logger = logging.getLogger("uvicorn.error")
 class OverviewChoice(BaseModel):
     language: str = Field(max_length=32)
     retry: bool = False
+    updatePersonal: bool = False
     regenerate: bool | Literal["overview", "timeline"] = False
+
+
+class OverviewEdit(BaseModel):
+    language: str = Field(max_length=32)
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    summary: str = Field(max_length=32_000)
+    markdown: str = Field(max_length=256_000)
 
 
 class ChatQuestion(BaseModel):
@@ -45,6 +54,32 @@ def session_status(db, key):
     return row
 
 
+@router.get("/api/sessions/{key}/personal-notes")
+def get_personal_notes(key: UUID, request: Request):
+    with request.app.state.library.connection() as db:
+        session_status(db, str(key))
+        return JSONResponse(personal_notes.get(db, str(key)), headers={"Cache-Control": "no-store"})
+
+
+@router.put("/api/sessions/{key}/personal-notes")
+def save_personal_notes(key: UUID, body: personal_notes.NoteEdit, request: Request):
+    check_origin(request)
+    with request.app.state.library.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        session_status(db, str(key))
+        revision = personal_notes.save(db, str(key), body)
+        if revision is None:
+            raise HTTPException(409, "My notes changed in another window.")
+        return {"revision": revision}
+
+
+@router.post("/api/personal-note-drafts", status_code=201)
+def stage_personal_notes(body: personal_notes.NoteDocument, request: Request):
+    check_origin(request)
+    with request.app.state.library.connection() as db:
+        return {"id": personal_notes.stage(db, body.document)}
+
+
 @router.get("/api/overview-languages")
 def overview_languages():
     return LANGUAGES
@@ -56,7 +91,8 @@ def overview_response(request, key, choice=None):
         session_status(db, key)
         try:
             value = selection(db, key, choice.language if choice else None, choice.retry if choice else False,
-                              regenerate=choice.regenerate if choice else False)
+                              regenerate=choice.regenerate if choice else False,
+                              update_personal=choice.updatePersonal if choice else False)
         except RegenerationConflict as error:
             raise HTTPException(409, str(error)) from error
     if value is None:
@@ -115,6 +151,25 @@ async def choose_overview(key: UUID, choice: OverviewChoice, request: Request):
     if choice.language != "auto" and choice.language not in LANGUAGES:
         raise HTTPException(400, "Choose a supported overview language.")
     return overview_response(request, str(key), choice)
+
+
+@router.put("/api/sessions/{key}/overview")
+def save_overview(key: UUID, body: OverviewEdit, request: Request):
+    check_origin(request)
+    if body.language not in LANGUAGES and body.language != "und":
+        raise HTTPException(400, "Choose a supported overview language.")
+    key = str(key)
+    with request.app.state.library.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        session_status(db, key)
+        try:
+            edit_overview(db, key, body.language, body.revision, body.summary, body.markdown)
+        except RegenerationConflict as error:
+            raise HTTPException(409, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        value = selection(db, key)
+    return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/sessions/{key}/chat")
@@ -198,7 +253,7 @@ async def ask_chat(key: UUID, body: ChatQuestion, request: Request):
         from insights import STAGE_REVISIONS
 
         signature = writing_cache.memo_key(
-            "chat-answer-v2", [STAGE_REVISIONS["chat"], source, context["fingerprint"], history, question]
+            "chat-answer-v2", [STAGE_REVISIONS["chat"], source, context["fingerprint"], context["personal"], history, question]
         )
         cached = completed_answer(db, signature)
         answer, status = (cached["answer"], "complete") if cached else ("", "streaming")

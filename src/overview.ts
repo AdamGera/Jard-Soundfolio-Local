@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 export type Topic = { id: number; start: number; label: string; detail?: string }
 export type OverviewVersion = { language: string; title: string; summary: string; markdown?: string; topics: Topic[] }
+export type EditableOverview = OverviewVersion & { editRevision: string }
 export type DraftTopic = { id?: number; start?: number; label: string; detail?: string }
 const stageLabels = {
   analysis: "Analyzing transcript…",
@@ -13,6 +14,9 @@ const stageLabels = {
 type Draft = { language: string; stage?: keyof typeof stageLabels; title?: string; summary?: string; markdown?: string; topics: DraftTopic[] }
 export type WritingTab = "overview" | "timeline"
 export type Overview = {
+  editRevision?: string | null
+  notesChanged?: boolean
+  updatingPersonal?: boolean
   scope?: WritingTab | null
   preference: string; autoLanguage: string; target: string
   status: "empty" | "queued" | "ready" | "error" | "blocked"
@@ -51,10 +55,11 @@ function parseDraft(data: string, target: string): Draft | null {
 
 export function useOverview(id?: string, initial?: Overview | null, visible = false) {
   const [value, setValue] = useState(initial)
+  const [refreshCount, refresh] = useState(0)
   const [preview, setPreview] = useState<{ target: string; draft: Draft } | null>(null)
   const [error, setError] = useState("")
   const [requesting, setRequesting] = useState(false)
-  const [failedChoice, setFailedChoice] = useState<{ language: string; retry: boolean; regenerate: WritingTab | false } | null>(null)
+  const [failedChoice, setFailedChoice] = useState<{ language: string; retry: boolean; regenerate: WritingTab | false; updatePersonal: boolean } | null>(null)
   const revision = useRef(0)
   const posts = useRef(Promise.resolve())
   const url = `/api/sessions/${id}/overview`
@@ -114,7 +119,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       timer = window.setTimeout(poll, stream?.readyState === 1 ? 4500 : 1400)
     }
     if (status === "queued" && target) connect(target)
-    if (!status || status === "queued") timer = window.setTimeout(poll, status ? 900 : 0)
+    if (refreshCount || !status || status === "queued") timer = window.setTimeout(poll, status === "queued" ? 900 : 0)
     window.addEventListener("focus", poll)
     return () => {
       window.removeEventListener("focus", poll)
@@ -124,9 +129,9 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       window.clearTimeout(timer)
       cancelAnimationFrame(frame)
     }
-  }, [id, url, requesting, status, target, visible])
+  }, [id, url, requesting, status, target, visible, refreshCount])
 
-  const select = useCallback((language: string, retry = false, regenerate: WritingTab | false = false) => {
+  const select = useCallback((language: string, retry = false, regenerate: WritingTab | false = false, updatePersonal = false) => {
     setPreview(null)
     setFailedChoice(null)
     const serial = ++revision.current
@@ -136,7 +141,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       if (serial !== revision.current) return
       try {
         const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ language, retry, regenerate }) })
+          body: JSON.stringify({ language, retry, regenerate, updatePersonal }) })
         if (!r.ok) {
           if (r.status === 409) throw new Error((await r.json()).detail)
           throw new Error("Could not update the " + (regenerate || "overview") + ". Try again.")
@@ -145,7 +150,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
         if (serial === revision.current) setValue(data)
       } catch (reason) {
         if (serial === revision.current) {
-          setFailedChoice({ language, retry, regenerate })
+          setFailedChoice({ language, retry, regenerate, updatePersonal })
           setError(reason instanceof Error ? reason.message : "Could not reach the local writer.")
         }
       } finally {
@@ -153,10 +158,32 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       }
     })
   }, [url])
-  const retry = () => failedChoice ? select(failedChoice.language, failedChoice.retry, failedChoice.regenerate)
+  const saveEdit = async (version: EditableOverview, summary: string, markdown: string) => {
+    ++revision.current
+    setRequesting(true)
+    try {
+      const response = await fetch(url, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: version.language, revision: version.editRevision, summary, markdown }),
+      })
+      if (!response.ok) {
+        const error = await response.json().catch(() => null)
+        throw new Error(typeof error?.detail === "string" ? error.detail : "Could not save the overview. Try again.")
+      }
+      const saved: Overview = await response.json()
+      setValue(saved)
+      setError("")
+      setFailedChoice(null)
+    } finally {
+      setRequesting(false)
+    }
+  }
+  const retry = () => failedChoice ? select(failedChoice.language, failedChoice.retry, failedChoice.regenerate, failedChoice.updatePersonal)
     : select(value?.preference ?? "auto", true)
   const version = useMemo(() => displayVersion(value?.version), [value?.version])
   const regenerate = (tab: WritingTab) => select(value?.preference ?? "auto", false, tab)
   const draft = visible && status === "queued" && !requesting && preview?.target === target ? preview?.draft : null
-  return { draft, errorTab: failedChoice?.regenerate || null, stageLabel: draft?.stage && stageLabels[draft.stage], value, version, error, select, retry, regenerate, requesting }
+  const updatePersonal = () => select(value?.preference ?? "auto", false, false, true)
+  const refreshNotes = useCallback(() => refresh(count => count + 1), [])
+  return { draft, saveEdit, updatePersonal, refreshNotes, errorTab: failedChoice?.regenerate || null, stageLabel: draft?.stage && stageLabels[draft.stage], value, version, error, select, retry, regenerate, requesting }
 }

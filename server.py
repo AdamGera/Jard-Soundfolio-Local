@@ -338,6 +338,7 @@ async def playback(request: Request, saved: UUID | None = None):
 async def transcribe_file(
     request: Request, recording: bool = False, diarization: bool = False, session: UUID | None = None,
     name: str = "", mime: str = "", live: bool = False, progress_only: bool = False,
+    notes_draft: UUID | None = None,
 ):
     check_audio_request(request)
     languages = transcription_languages(request)
@@ -346,10 +347,11 @@ async def transcribe_file(
     with tempfile.TemporaryDirectory(prefix=".upload-", dir=request.app.state.library.root) as folder:
         source = Path(folder) / "audio"
         await save_upload(request, source)
-        return await accept_audio(request, source, name, mime, languages, recording, diarization, live, progress_only)
+        return await accept_audio(request, source, name, mime, languages, recording, diarization, live, progress_only,
+                                  notes_draft=str(notes_draft) if notes_draft else None)
 
 
-async def accept_audio(request, source, name, mime, languages, recording, diarization, live, progress_only, stage_id=None):
+async def accept_audio(request, source, name, mime, languages, recording, diarization, live, progress_only, stage_id=None, *, notes_draft=None):
     library = request.app.state.library
     try:
         duration = await audio_duration(source)
@@ -360,7 +362,7 @@ async def accept_audio(request, source, name, mime, languages, recording, diariz
                        languageHints=list(languages), model=MODEL_ID, modelRevision=REVISION,
                        speakerModel=DIARIZATION_ID if diarization and request.app.state.diarizer else None,
                        speakerModelRevision=DIARIZATION_REVISION if diarization and request.app.state.diarizer else None)
-        key, source = await run_in_threadpool(library.create, source, name, mime, options, duration, key=stage_id)
+        key, source = await run_in_threadpool(library.create, source, name, mime, options, duration, key=stage_id, notes_draft=notes_draft)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     except FileNotFoundError as error:
@@ -455,12 +457,14 @@ def check_native(request):
 
 
 @app.post("/api/native/staging", status_code=201)
-async def new_stage(request: Request, recording: bool = False):
+async def new_stage(request: Request, recording: bool = False, dictation: bool = False):
     check_native(request)
     key = str(uuid4())
     path = request.app.state.staging / key
     path.touch(mode=0o600, exist_ok=False)
-    if recording:
+    if dictation:
+        path.with_suffix(".dictation").touch(mode=0o600, exist_ok=False)
+    elif recording:
         recording_marker(path).touch(mode=0o600, exist_ok=False)
     return {"id": key, "path": str(path)}
 
@@ -479,19 +483,23 @@ def stage_path(request, key):
 
 
 @app.delete("/api/native/staging/{key}", status_code=204)
-async def abandon_stage(request: Request, key: UUID):
+async def abandon_stage(request: Request, key: UUID, dictation: bool = False):
     check_native(request)
     if key in request.app.state.submitting:
         raise HTTPException(409, "Audio is being accepted.")
     path = stage_path(request, key)
+    if dictation and not path.with_suffix(".dictation").is_file():
+        raise HTTPException(404, "This dictation is unavailable.")
     path.unlink()
+    path.with_suffix(".dictation").unlink(missing_ok=True)
     recording_marker(path).unlink(missing_ok=True)
     return Response(status_code=204)
 
 
 @app.post("/api/native/staging/{key}/submit")
 async def submit_stage(request: Request, key: UUID, recording: bool = False, diarization: bool = False,
-                       name: str = "", mime: str = "audio/wav", live: bool = False, recover: bool = False):
+                       name: str = "", mime: str = "audio/wav", live: bool = False, recover: bool = False,
+                       notes_draft: UUID | None = None):
     check_native(request)
     state = request.app.state
     # The staging ID becomes the session ID, so retrying a lost response cannot duplicate it.
@@ -505,6 +513,16 @@ async def submit_stage(request: Request, key: UUID, recording: bool = False, dia
         raise HTTPException(409, "Audio is being accepted.")
     languages = transcription_languages(request)
     source = stage_path(request, key)
+    if source.with_suffix(".dictation").is_file():
+        raise HTTPException(409, "Dictation belongs in My notes.")
+    if recover and not notes_draft and recording_marker(source).is_file():
+        with recording_marker(source).open("rb") as marker:
+            reference = marker.read(36).decode("ascii", errors="ignore")
+        with suppress(ValueError):
+            candidate = UUID(reference)
+            with state.library.connection() as db:
+                if db.execute("SELECT 1 FROM personal_note_drafts WHERE id=?", (str(candidate),)).fetchone():
+                    notes_draft = candidate
     state.submitting.add(key)
     try:
         state.live_speakers.pop(key, None)
@@ -515,11 +533,49 @@ async def submit_stage(request: Request, key: UUID, recording: bool = False, dia
                 await run_in_threadpool(recover_wav, source)
             except ValueError as error:
                 raise HTTPException(400, str(error)) from error
-        result = await accept_audio(request, source, name, mime, languages, recording, diarization, live, True, str(key))
+        result = await accept_audio(request, source, name, mime, languages, recording, diarization, live, True, str(key),
+                                    notes_draft=str(notes_draft) if notes_draft else None)
         recording_marker(source).unlink(missing_ok=True)
         return result
     finally:
         state.submitting.discard(key)
+
+
+async def dictate_audio(request, source, languages):
+    parts = []
+    try:
+        async with request.app.state.insights.model.audio_priority():
+            async with aclosing(audio_blocks(source, multilingual=len(languages) > 1)) as blocks:
+                async for pcm in blocks:
+                    result = await decode_pcm(request, pcm, languages, live=True)
+                    if result["text"].strip():
+                        parts.append(result["text"].strip())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except Exception as error:
+        logger.exception("Dictation inference failed.")
+        raise HTTPException(500, "Could not transcribe dictation. Try again.") from error
+    return {"text": " ".join(parts)}
+
+
+@app.post("/api/personal-notes/dictation")
+async def browser_dictation(request: Request):
+    check_audio_request(request)
+    languages = transcription_languages(request)
+    with tempfile.TemporaryDirectory(prefix=".upload-", dir=request.app.state.library.root) as folder:
+        source = Path(folder) / "dictation"
+        await save_upload(request, source)
+        return await dictate_audio(request, source, languages)
+
+
+@app.post("/api/native/staging/{key}/dictate")
+async def native_dictation(request: Request, key: UUID):
+    check_native(request)
+    languages = transcription_languages(request)
+    path = stage_path(request, key)
+    if not path.with_suffix(".dictation").is_file():
+        raise HTTPException(404, "This dictation is unavailable.")
+    return await dictate_audio(request, path, languages)
 
 
 @app.post("/api/native/staging/{key}/preview")

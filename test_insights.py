@@ -37,6 +37,24 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
             self.rows = passages(db, self.key)
             self.expected = note_identity(db, self.key)
 
+    async def test_both_overview_calls_receive_the_same_personal_notes_snapshot(self):
+        with self.store.connection() as db:
+            db.execute("UPDATE overviews SET queued_personal=? WHERE id=?", ("Follow up on pricing.", self.key))
+        self.insights.model.structured.side_effect = [
+            {"anchor1": 1, "writerPrompt": "Summarize the launch.", "personalFocus": "Follow up on pricing."},
+            {"lead": "The launch is Friday.", "personalContext":
+             {"heading": "My notes", "detail": "Follow up on pricing. ⟦2⟧ [P1]"}},
+        ]
+        expected = (*self.expected, "en", 0)
+        result = await self.insights.write_overview(self.key, self.rows, "English", expected)
+        planner, writer = self.insights.model.structured.call_args_list
+        self.assertEqual(planner.args[1], writer.args[1])
+        self.assertEqual(writer.args[1], {
+            "completeTranscript": excerpts(self.rows), "personalNotes": "Follow up on pricing.",
+        })
+        self.assertIn("Summarize the launch.", writer.args[0])
+        self.assertEqual(result["markdown"], "## My notes\n\nFollow up on pricing.")
+
     async def test_writer_receives_complete_transcript_and_guide_then_reuses_both_on_retry(self):
         rows = [{"id": i, "start": i, "text": f"Passage {i} with a different detail."} for i in range(1, 801)]
         rows[-1]["text"] = "The closing exchange leaves the supplier agreement open pending a second bid."

@@ -1,8 +1,8 @@
 import { lazy, Suspense, useCallback, useDeferredValue, useMemo, useEffect, useRef, useState, type ReactNode } from "react"
-import { AudioLines, CalendarDays, Check, ChevronUp, Clock3, Copy, RotateCw } from "lucide-react"
+import { AudioLines, CalendarDays, ChartNoAxesColumnIncreasing, Check, ChevronUp, Clock3, Copy, FileText, LayoutDashboard, ListTree, Pencil, RotateCw, StickyNote } from "lucide-react"
 import type { SavedSession, Transcript } from "@/audio"
 import { clock } from "@/speaker-activity"
-import { useOverview } from "@/overview"
+import { useOverview, type EditableOverview } from "@/overview"
 import { AudioPlayer, usePlayback } from "./audio-player"
 import { OverviewLanguage, languageName } from "./overview-language"
 import { transcriptMatches } from "@/transcript-search"
@@ -13,6 +13,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs"
 const SpeakerAnalytics = lazy(() => import("./speaker-analytics").then(module => ({ default: module.SpeakerAnalytics })))
 const TimedTranscript = lazy(() => import("./timed-transcript").then(module => ({ default: module.TimedTranscript })))
 const SessionChat = lazy(() => import("./session-conversation"))
+const PersonalNotesEditor = lazy(() => import("./personal-notes").then(module => ({ default: module.PersonalNotesEditor })))
+const OverviewEditor = lazy(() => import("./overview-editor"))
 const NoteMarkdown = lazy(() => import("./note-markdown").then(module => ({ default: module.NoteMarkdown })))
 
 type Props = {
@@ -20,22 +22,27 @@ type Props = {
   tab: string; onTab: (tab: string) => void
   working: boolean; recording: boolean; emptyText: string; progress: ReactNode
   copied: boolean; onCopy: () => void
+  dictationEnabled: boolean; onDictationBusy: (busy: boolean) => void
 }
 const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
 
-export function ResultsPanel({ result, session, source, tab, onTab, working, recording, emptyText, progress, copied, onCopy }: Props) {
+export function ResultsPanel({ result, session, source, tab, onTab, working, recording, emptyText, progress, copied, onCopy, dictationEnabled, onDictationBusy }: Props) {
   const complete = session?.status === "complete"
   const overview = useOverview(complete ? session.id : undefined, session?.overview, tab === "overview" || tab === "timeline")
   const writing = overview.value
   const version = overview.version
+  const editRevision = writing?.editRevision
+  const [editing, setEditing] = useState<EditableOverview | null>(null)
   const [citation, setCitation] = useState<{ seconds: number } | null>(null)
   const [dock, setDock] = useState<"audio" | "chat" | "expanded" | null>(null)
   const openPlayer = useCallback(() => setDock("audio"), [])
   const player = usePlayback(source, result.durationSeconds, openPlayer)
   const audioTrigger = useRef<HTMLButtonElement>(null)
+  const editTrigger = useRef<HTMLButtonElement>(null)
   const toggleChat = useCallback((open: boolean) => setDock(open ? "chat" : null), [])
   const resizeChat = useCallback(() => setDock(current => current === "expanded" ? "chat" : "expanded"), [])
   const [scrolled, setScrolled] = useState(false)
+  const [notesOpened, setNotesOpened] = useState(tab === "notes")
   const [findOpen, setFindOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [matchIndex, setMatchIndex] = useState(0)
@@ -58,6 +65,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     setFindOpen(false)
     setQuery("")
     setMatchIndex(0)
+    if (value === "notes") setNotesOpened(true)
     onTab(value)
   }, [onTab])
   useEffect(() => {
@@ -102,7 +110,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
   }, [tab])
   const writingTab = tab === "overview" || tab === "timeline" ? tab : null
   const showWritingStatus = !writing?.scope || tab === writing.scope
-  const draft = showWritingStatus ? overview.draft : null
+  const draft = showWritingStatus && !writing?.updatingPersonal ? overview.draft : null
   const note = draft?.summary || draft?.markdown ? draft : version
   const timeline = draft?.topics.length ? draft : version
   const showingPrevious = version && (tab === "timeline" ? timeline === version : note === version)
@@ -145,20 +153,28 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
         <span><CalendarDays aria-hidden="true" />{date.format(new Date(session.created))}</span>
         <span><Clock3 aria-hidden="true" /><bdi>{clock(result.durationSeconds ?? 0)}</bdi></span>
         {writing?.status !== "empty" && <OverviewLanguage detected={writing?.autoLanguage ?? ""}
-          value={writing?.preference ?? "auto"} onSelect={overview.select} />}
+          value={writing?.preference ?? "auto"} disabled={!!editing} onSelect={overview.select} />}
         {writingTab && version && writing && version.language === writing.target && <Button size="sm" variant="ghost" className="regenerate-note"
           aria-label={`Regenerate ${writingTab}`} title={`Regenerate ${writingTab}`}
-          disabled={writing.status === "queued" || overview.requesting}
+          disabled={!!editing || writing.status === "queued" || overview.requesting}
           onClick={() => overview.regenerate(writingTab)}><RotateCw aria-hidden="true" /><span>Regenerate</span></Button>}
+        {tab === "overview" && version && editRevision && !editing &&
+          <Button ref={editTrigger} size="sm" variant="ghost" className="regenerate-note"
+            aria-label="Edit overview" title="Edit overview"
+            disabled={writing?.status === "queued" || overview.requesting}
+            onClick={() => setEditing({ ...version, editRevision })}><Pencil aria-hidden="true" /><span>Edit</span></Button>}
       </div>
     </header>
     <Tabs className="transcript-panel" data-finding={findOpen && tab === "transcript"} value={tab} onValueChange={changeTab}>
       <div className="panel-heading" data-scrolled={scrolled}>
         <TabsList ref={tabList} aria-label="Recording results">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="timeline">Timeline</TabsTrigger>
-          <TabsTrigger value="transcript">Transcript</TabsTrigger>
-          <TabsTrigger value="analytics" disabled={working || recording}>Speaker analytics</TabsTrigger>
+          <TabsTrigger value="overview"><LayoutDashboard aria-hidden="true" className="size-3.5" />Overview</TabsTrigger>
+          <TabsTrigger value="notes"><StickyNote aria-hidden="true" className="size-3.5" />My Notes</TabsTrigger>
+          <TabsTrigger value="transcript"><FileText aria-hidden="true" className="size-3.5" />Transcript</TabsTrigger>
+          <TabsTrigger value="timeline"><ListTree aria-hidden="true" className="size-3.5" />Timeline</TabsTrigger>
+          <TabsTrigger value="analytics" disabled={working || recording}>
+            <ChartNoAxesColumnIncreasing aria-hidden="true" className="size-3.5" />Speaker analytics
+          </TabsTrigger>
         </TabsList>
         {tab === "transcript" && result.text && !recording && !working &&
           <div className="transcript-tools">
@@ -168,9 +184,15 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
             {copied ? <Check /> : <Copy />}<span>{copied ? "Copied" : "Copy"}</span>
           </Button></div>}
       </div>
-      <TabsContent value="overview" className="note-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
+      <TabsContent value="overview" forceMount={editing ? true : undefined} hidden={tab !== "overview"}
+        className="note-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         {noteStatus}
-        {note && <div className="overview-copy" dir="auto" lang={note.language}>
+        {editing ? <Suspense fallback={null}>
+          <OverviewEditor version={editing} onSave={overview.saveEdit} onClose={() => {
+            setEditing(null)
+            requestAnimationFrame(() => editTrigger.current?.focus({ preventScroll: true }))
+          }} />
+        </Suspense> : note && <div className="overview-copy" dir="auto" lang={note.language}>
           {note.summary && <p className="note-lead">{note.summary}</p>}
           {note.markdown && <Suspense fallback={null}>
             <NoteMarkdown text={note.markdown} ready={ready} cite={seconds => seek(seconds, true)} />
@@ -193,6 +215,15 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
       <TabsContent value="transcript" className={transcriptClass}
         ref={area} onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         {transcriptContent}
+      </TabsContent>
+      <TabsContent value="notes" forceMount hidden={tab !== "notes"} className="note-body personal-note-body"
+        onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
+        {(notesOpened || tab === "notes") && <Suspense fallback={null}>
+          <PersonalNotesEditor sessionId={session.id} initial={session.personalNotes} languages={session.languageHints}
+            dictationEnabled={dictationEnabled} onDictationBusy={onDictationBusy} onSaved={overview.refreshNotes}
+            notesChanged={writing?.notesChanged} overviewBusy={!!editing || overview.requesting || writing?.status === "queued"}
+            onUpdateOverview={result.text ? () => { overview.updatePersonal(); changeTab("overview") } : undefined} />
+        </Suspense>}
       </TabsContent>
       <TabsContent value="analytics" className="analytics-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         <Suspense fallback={null}><SpeakerAnalytics result={result} time={player.time} ready={ready} seek={player.seek} /></Suspense>

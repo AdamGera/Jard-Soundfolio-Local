@@ -103,6 +103,7 @@ class MacBridge:
         self.stage_lock = None
         self.dialog_lock = asyncio.Lock()
         self.capture_session = None
+        self.dictation_stages = {}
 
     async def api(self, method, route, **options):
         response = await self.http.request(method, "/api/" + route, **options)
@@ -209,12 +210,13 @@ class MacBridge:
             "live": "true" if args.get("live") is True else "false",
         }
 
-    async def submit(self, stage_id, options, *, name, mime, recording, recover=False):
+    async def submit(self, stage_id, options, *, name, mime, recording, recover=False, notes_draft=None):
         return await self.api(
             "POST",
             f"native/staging/{stage_id}/submit",
             params={
                 **options,
+                **({"notes_draft": notes_draft} if notes_draft else {}),
                 "name": name,
                 "mime": mime,
                 "recording": str(recording).lower(),
@@ -237,6 +239,7 @@ class MacBridge:
                 name=Path(selection).name,
                 mime=mimetypes.guess_type(selection)[0] or "application/octet-stream",
                 recording=False,
+                notes_draft=args.get("notesDraft"),
             )
         except BaseException:
             with contextlib.suppress(httpx.HTTPError):
@@ -249,20 +252,26 @@ class MacBridge:
         async with self.capture_lock:
             if self.job and not self.job.done():
                 raise ValueError("A recording is already active.")
-            mode = args.get("mode", "both")
+            dictation = args.get("dictation")
+            if dictation:
+                dictation = str(UUID(dictation))
+            mode = "mic" if dictation else args.get("mode", "both")
             if mode not in ("both", "mic", "system"):
                 raise ValueError("Unknown recording source.")
-            self.settings = self.options(args)
+            self.settings = self.options({**args, "diarization": False, "live": True} if dictation else args)
             if (await self.api("GET", "status"))["status"] != "ready":
                 raise ValueError("Wait for the speech model to finish loading.")
             stage = await self.api(
-                "POST", "native/staging", params={"recording": "true"}
+                "POST", "native/staging", params={"dictation" if dictation else "recording": "true"}
             )
             try:
                 self.stage_lock = (
-                    Path(stage["path"]).with_suffix(".recording").open("rb")
+                    Path(stage["path"]).with_suffix(".dictation" if dictation else ".recording").open("r+b")
                 )
                 fcntl.flock(self.stage_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if not dictation and args.get("notesDraft"):
+                    self.stage_lock.write(str(UUID(args["notesDraft"])).encode("ascii"))
+                    self.stage_lock.flush()
                 self.recorder = await asyncio.create_subprocess_exec(
                     str(self.helpers / "jard-capture"),
                     "record",
@@ -282,7 +291,8 @@ class MacBridge:
             self.stage = stage
             self.capture_session = {
                 "mode": mode,
-                "live": bool(args.get("live")),
+                "live": bool(dictation or args.get("live")),
+                **({"dictation": dictation} if dictation else {}),
                 "seconds": 0,
                 "text": "",
                 "segments": [],
@@ -295,6 +305,8 @@ class MacBridge:
         start = 0
         parts = []
         warned = False
+        capture_id = self.capture_session.get("dictation")
+        metadata = {"dictation": capture_id} if capture_id else {}
         while self.stage:
             await asyncio.sleep(0.35)
             if not self.capture:
@@ -324,6 +336,7 @@ class MacBridge:
                     ]
                     emit(
                         "preview",
+                        **metadata,
                         text=self.capture["text"],
                         segments=self.capture["segments"],
                     )
@@ -332,6 +345,7 @@ class MacBridge:
                 if not warned:
                     emit(
                         "warning",
+                        **metadata,
                         message="Live preview is delayed. The recording is still being saved.",
                     )
                 warned = True
@@ -339,6 +353,14 @@ class MacBridge:
 
     async def record_events(self):
         child, stage = self.recorder, self.stage
+        capture = self.capture_session
+        capture_id = capture.get("dictation")
+
+        def notify(kind, **fields):
+            if capture_id:
+                fields["dictation"] = capture_id
+            emit(kind, **fields)
+
         path = Path(stage["path"])
         preview = asyncio.create_task(self.live_preview())
         reason = ""
@@ -349,14 +371,14 @@ class MacBridge:
                 kind = event.get("event")
                 if kind == "started":
                     self.capture = self.capture_session
-                    emit(
+                    notify(
                         "started",
                         mode=self.capture["mode"],
                         microphone=event["microphone"],
                     )
                 elif kind == "levels" and self.capture:
                     self.capture["seconds"] = event["seconds"]
-                    emit(
+                    notify(
                         "levels",
                         seconds=event["seconds"],
                         mic=event["mic"],
@@ -364,7 +386,7 @@ class MacBridge:
                         microphone=event["microphone"],
                     )
                 elif kind == "sourceChanged":
-                    emit(kind, microphone=event["microphone"], message=event["message"])
+                    notify(kind, microphone=event["microphone"], message=event["message"])
                 elif kind == "error":
                     reason = event["message"]
                     if event.get("permission") in ("mic", "system"):
@@ -386,8 +408,17 @@ class MacBridge:
             self.capture = None
             self.recorder = None
         try:
+            if capture_id:
+                if not capture.get("discard") and not permission and path.is_file() and path.stat().st_size > 44:
+                    self.dictation_stages[capture_id] = stage["id"]
+                    notify("dictationReady", id=stage["id"])
+                else:
+                    await self.api("DELETE", "native/staging/" + stage["id"])
+                    if not capture.get("discard"):
+                        notify("error", message=reason or "No microphone audio was captured.", **permission)
+                return
             if path.is_file() and path.stat().st_size > 44:
-                emit("finished", reason=reason or "Stopped")
+                notify("finished", reason=reason or "Stopped")
                 data = await self.submit(
                     stage["id"],
                     self.settings,
@@ -398,19 +429,19 @@ class MacBridge:
                     recording=True,
                     recover=True,
                 )
-                emit("accepted", id=data["id"])
+                notify("accepted", id=data["id"])
             else:
                 await self.api("DELETE", "native/staging/" + stage["id"])
-                emit(
+                notify(
                     "error",
                     message=reason
                     or "No audio was captured. Check the selected source and its macOS permission.",
                     **permission,
                 )
         except (httpx.HTTPError, OSError) as e:
-            emit(
+            notify(
                 "error",
-                message="The recording was preserved for recovery. " + explain(e),
+                message=explain(e) if capture_id else "The recording was preserved for recovery. " + explain(e),
             )
         finally:
             self.stage_lock.close()
@@ -423,6 +454,17 @@ class MacBridge:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 child.stdin.write(b"stop\n")
                 await child.stdin.drain()
+
+    async def discard_dictation(self, key):
+        owner = next((capture for capture, stage in self.dictation_stages.items() if stage == key), None)
+        if owner is None:
+            return
+        try:
+            await self.api("DELETE", "native/staging/" + key, params={"dictation": "true"})
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 404:
+                raise
+        self.dictation_stages.pop(owner, None)
 
     async def export(self, args):
         key, kind = str(UUID(args["id"])), args["kind"]
@@ -479,6 +521,29 @@ class MacBridge:
             if self.job:
                 await asyncio.shield(self.job)
             return None
+        if command == "jard.dictation":
+            action = args.get("action")
+            if action in ("stop", "cancel"):
+                capture = self.capture_session
+                if capture and capture.get("dictation") == args.get("id"):
+                    capture["discard"] = action == "cancel"
+                    await self.stop()
+                    await asyncio.shield(self.job)
+                if action == "cancel" and (key := self.dictation_stages.get(args.get("id"))):
+                    await self.discard_dictation(key)
+                return None
+            key = str(UUID(args["id"]))
+            if action == "discard":
+                return await self.discard_dictation(key)
+            if action == "transcribe":
+                if key not in self.dictation_stages.values():
+                    raise ValueError("This dictation is unavailable.")
+                text = await self.api("POST", "native/staging/" + key + "/dictate",
+                                      params=self.options(args))
+                with contextlib.suppress(httpx.HTTPError):
+                    await self.discard_dictation(key)
+                return text
+            raise ValueError("Unsupported dictation action.")
         if command == "jard.live":
             enabled = args.get("enabled") is True
             if self.capture_session:
@@ -537,6 +602,8 @@ class MacBridge:
         send({"response": response})
 
     async def close(self):
+        if self.capture_session and self.capture_session.get("dictation"):
+            self.capture_session["discard"] = True
         await self.stop()
         if self.job:
             try:
@@ -546,6 +613,9 @@ class MacBridge:
                     self.recorder.kill()
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(self.job), 15)
+        for key in list(self.dictation_stages.values()):
+            with contextlib.suppress(httpx.HTTPError):
+                await self.discard_dictation(key)
         if self.lease_task:
             self.lease_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

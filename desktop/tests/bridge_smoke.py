@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from uuid import uuid4
 
 import httpx
 
@@ -24,7 +25,7 @@ async def smoke(root):
     base = f"http://127.0.0.1:{port}"
     audio = root/"review.wav"
     subprocess.run(["say","-o",root/"speech.aiff","The library approved twelve history books. The books will arrive on Monday."],check=True)
-    subprocess.run(["ffmpeg","-v","error","-i",root/"speech.aiff","-ar","48000","-ac","1","-fflags","+bitexact",audio],check=True)
+    subprocess.run(["ffmpeg","-v","error","-i",root/"speech.aiff","-ar","48000","-ac","1","-af","apad=pad_dur=1","-fflags","+bitexact",audio],check=True)
     env["FIXTURE_AUDIO"] = str(audio)
     # Real file panels and audio hardware are interactive. These two helpers supply
     # exactly the paths/events those platform adapters deliver; the rest is production code.
@@ -36,9 +37,11 @@ print(json.dumps({"path":str(audio if sys.argv[1]=="open-audio" else audio.paren
 """)
     capture=root/"jard-capture"
     capture.write_text("#!/usr/bin/env python3\n"+"""import json,shutil,sys,os
+from pathlib import Path
 if sys.argv[1]=="devices":
     print(json.dumps({"microphone":"Fixture microphone"}),flush=True)
-elif "--mode" in sys.argv and sys.argv[sys.argv.index("--mode")+1] in ("mic","system"):
+elif ("--mode" in sys.argv and sys.argv[sys.argv.index("--mode")+1] in ("mic","system")
+      and not Path(sys.argv[sys.argv.index("--output")+1]).with_suffix(".dictation").exists()):
     source = sys.argv[sys.argv.index("--mode")+1]
     print(json.dumps({"event":"error","permission":source,"message":"macOS declined capture"}),flush=True)
     sys.exit(1)
@@ -94,8 +97,30 @@ else:
                         assert data["status"]=="processing",data["status"]
                         await asyncio.sleep(.25)
             opts=dict(languages=["en"],diarization=True)
-            first=(await rpc("openAudio",**opts))["id"]
+            take = str(uuid4())
+            await rpc("record", mode="mic", live=True, languages=["en"], dictation=take, diarization=True)
+            async with asyncio.timeout(45):
+                while not any(row.get("detail",{}).get("event") == "preview" and
+                              row["detail"].get("dictation") == take for row in seen):
+                    await event()
+            await rpc("dictation", action="stop", id=take)
+            recorded = await wait_event("dictationReady")
+            assert recorded["dictation"] == take
+            dictated = await rpc("dictation", action="transcribe", id=recorded["id"], languages=["en"])
+            assert "history books" in dictated["text"].lower()
+            assert not (await web.get("/api/sessions")).raise_for_status().json()
+            assert not list((root/"library"/"staging").glob("*.dictation"))
+            cancelled = str(uuid4())
+            await rpc("record", mode="mic", live=True, languages=["en"], dictation=cancelled)
+            await rpc("dictation", action="cancel", id=cancelled)
+            assert not list((root/"library"/"staging").glob("*.dictation"))
+            document = {"type":"doc","content":[{"type":"heading","attrs":{"level":2},"content":[
+                {"type":"text","text": "Ask about paperback pricing."}]}]}
+            draft = (await web.post("/api/personal-note-drafts", json={"document":document})).raise_for_status().json()
+            print("Native microphone-only dictation, live preview, final transcription and temporary file cleanup passed.",flush=True)
+            first=(await rpc("openAudio", notesDraft=draft["id"], **opts))["id"]
             saved=await completed(first)
+            assert saved["personalNotes"] == {"document":document,"revision":1}
             assert saved["transcript"]["words"] and saved["transcript"]["segments"]
             for kind in ("audio","json"):
                 assert (await rpc("export", id=first,kind=kind))["saved"]

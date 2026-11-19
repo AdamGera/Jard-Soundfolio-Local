@@ -14,8 +14,8 @@ const items = [auto, ...Object.entries(names).map(([code, name]) => ({ code, nam
   .sort((a,b) => a.name.localeCompare(b.name))]
 type Item = typeof auto
 
-export function OverviewLanguage({ value, detected, onSelect }: {
-  value: string; detected: string; onSelect: (code: string) => void
+export function OverviewLanguage({ value, detected, disabled, onSelect }: {
+  value: string; detected: string; disabled?: boolean; onSelect: (code: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState<Item | null>(null)
@@ -24,7 +24,7 @@ export function OverviewLanguage({ value, detected, onSelect }: {
   const selected = items.find(i => i.code === value) ?? auto
   const label = value === "auto" ? (detected && detected !== "und" ? `Auto · ${languageName(detected)}` : "Auto") : selected.name
   return <>
-    <Combobox.Root<Item> items={items} value={selected} open={open} onOpenChange={setOpen}
+    <Combobox.Root<Item> items={items} value={selected} disabled={disabled} open={open} onOpenChange={setOpen}
     itemToStringLabel={item => item.name}
     filter={(item, search) => (item.name + " " + item.native + " " + item.code).toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())}
     onValueChange={item => {

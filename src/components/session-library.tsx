@@ -67,7 +67,7 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
   }
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.repeat || event.isComposing) return
+      if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || event.repeat || event.isComposing) return
       if (event.key.toLowerCase() === "k" && !event.shiftKey) {
         if (busy || deleting || document.querySelector('[role="alertdialog"]')) return
         event.preventDefault()

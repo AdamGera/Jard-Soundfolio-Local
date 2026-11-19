@@ -1,7 +1,7 @@
 import { desktopBridge } from "./desktop"
 
 const sessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
-const tabs = new Set(["overview", "timeline", "transcript", "analytics"])
+const tabs = new Set(["overview", "timeline", "transcript", "notes", "analytics"])
 
 const desktopLocation = "jard.lastSession"
 

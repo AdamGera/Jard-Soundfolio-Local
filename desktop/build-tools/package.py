@@ -54,7 +54,7 @@ def copy_engine(resources):
     for name in (
         "audio_file.py", "chat_context.py", "diarization.py", "engine_lifecycle.py",
         "insights.py", "local_qwen.py", "native_recordings.py", "note_stream.py", "overview_exchanges.py", "place_hints.py",
-        "rumble_model.py", "server.py", "session_notes.py", "session_store.py",
+        "personal_notes.py", "rumble_model.py", "server.py", "session_notes.py", "session_store.py",
         "speaker_alignment.py", "title_words.py", "writing_api.py", "writing_cache.py",
         "overview_autonyms.json", "overview_languages.json", "place_names.json",
     ):

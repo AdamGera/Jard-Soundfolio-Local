@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+import personal_notes
 import writing_cache
 from fastapi import FastAPI
 
-from session_notes import RegenerationConflict, publish, selection
+from session_notes import RegenerationConflict, edit_overview, publish, selection
 from session_store import SessionStore
 from writing_api import router
 
@@ -86,6 +87,98 @@ class NoteStorageTests(unittest.TestCase):
             self.store.append(key, dict(text="Speech", language=lang, words=[], segments=[]), end)
         self.store.finish(key)
         return key
+
+    def test_personal_notes_snapshot_and_language_update_are_independent(self):
+        self.complete("ar", "Arabic overview")
+        self.choose("en")
+        self.complete("en", "English overview")
+
+        def edit(text, revision):
+            return personal_notes.NoteEdit(revision=revision, document={"type": "doc", "content": [
+                {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": text}]}]})
+
+        with self.store.connection() as db:
+            self.assertEqual(personal_notes.save(db, self.key, edit("Follow up on pricing", 0)), 1)
+            self.assertIsNone(personal_notes.save(db, self.key, edit("A competing edit", 0)))
+            self.assertTrue(selection(db, self.key)["notesChanged"])
+            queued = selection(db, self.key, "en", update_personal=True)
+            self.assertEqual(queued["version"]["title"], "English overview")
+            self.assertEqual(queued["scope"], "overview")
+            self.assertTrue(queued["updatingPersonal"])
+            personal_notes.save(db, self.key, edit("Follow up on delivery", 1))
+            snapshot = db.execute("SELECT queued_personal FROM overviews WHERE id=? AND lang='en'",
+                                  (self.key,)).fetchone()[0]
+            self.assertEqual(snapshot, "## Follow up on pricing")
+            from chat_context import snapshot as chat_snapshot
+            self.assertEqual(chat_snapshot(db, self.key)["personal"], "## Follow up on delivery")
+            publish(db, self.key, "en", version("en", "English update"))
+            self.assertTrue(selection(db, self.key)["notesChanged"])
+            selection(db, self.key, "en", update_personal=True)
+            publish(db, self.key, "en", version("en", "English update"))
+            self.assertFalse(selection(db, self.key)["notesChanged"])
+            self.assertTrue(selection(db, self.key, "auto")["notesChanged"])
+            personal_notes.save(db, self.key, personal_notes.NoteEdit(revision=2, document=personal_notes.EMPTY))
+            self.assertTrue(selection(db, self.key, "en")["notesChanged"])
+
+    def test_manual_overview_is_local_and_survives_timeline_publication(self):
+        with self.store.connection() as db:
+            original = version("ar", "Session title")
+            original["markdown"] = "Original text ⟦2⟧"
+            publish(db, self.key, "ar", original)
+            revision = selection(db, self.key)["editRevision"]
+            with self.assertRaisesRegex(ValueError, "timestamps"):
+                edit_overview(db, self.key, "ar", revision, "Manual lead", "New ⟦99⟧")
+            edit_overview(db, self.key, "ar", revision, "Manual lead", "Edited text ⟦2⟧")
+            # A retry of the same successful write must be safe.
+            edit_overview(db, self.key, "ar", revision, "Manual lead", "Edited text ⟦2⟧")
+            with self.assertRaisesRegex(RegenerationConflict, "changed"):
+                edit_overview(db, self.key, "ar", revision, "Stale edit", "")
+            from chat_context import snapshot
+            self.assertEqual(snapshot(db, self.key)["note"]["summary"], "Manual lead")
+
+        peer = self.duplicate("same-audio.wav")
+        self.assertIsNone(self.store.get(peer)["overview"]["version"])
+        with self.store.connection() as db:
+            selection(db, self.key, "ar", regenerate="timeline")
+            publish(db, self.key, "ar", version("ar", "Timeline output"))
+            saved = selection(db, self.key)["version"]
+            self.assertEqual(saved["title"], "Session title")
+            self.assertEqual(saved["markdown"], "Edited text ⟦2⟧")
+            selection(db, self.key, "ar", regenerate="overview")
+            publish(db, self.key, "ar", original)
+            self.assertEqual(selection(db, self.key)["version"], original)
+
+    def test_personal_checklist_round_trips_and_keeps_completion_in_context(self):
+        def item(text, checked):
+            return {"type": "taskItem", "attrs": {"checked": checked}, "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+
+        document = {"type": "doc", "content": [
+            {"type": "taskList", "content": [item("Read proposal", True), item("Send feedback", False)]}]}
+        edit = personal_notes.NoteEdit(document=document, revision=0)
+        with self.store.connection() as db:
+            self.assertEqual(personal_notes.save(db, self.key, edit), 1)
+            self.assertEqual(personal_notes.get(db, self.key)["document"], document)
+            self.assertEqual(personal_notes.as_context(db, self.key), "- [x] Read proposal\n- [ ] Send feedback")
+
+    def test_initial_overview_cannot_reuse_identical_audio_with_different_personal_notes(self):
+        self.complete("ar", "Original recording")
+        with self.store.connection() as db:
+            draft = personal_notes.stage(db, {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "My private context"}]}]})
+        source = self.store.root / "with-notes.wav"
+        source.write_bytes(b"audio")
+        key, _ = self.store.create(source, source.name, "audio/wav", {"recording": False, "diarization": False},
+                                   25, notes_draft=draft)
+        for end, lang in [(2, "English"), (25, "Arabic")]:
+            self.store.append(key, dict(text="Speech", language=lang, words=[], segments=[]), end)
+        self.store.finish(key)
+        saved = self.store.get(key)
+        self.assertEqual(saved["overview"]["status"], "queued")
+        self.assertEqual(saved["personalNotes"]["revision"], 1)
+        with self.store.connection() as db:
+            row = db.execute("SELECT queued_personal FROM overviews WHERE id=?", (key,)).fetchone()
+            self.assertEqual(row[0], "My private context")
 
     def test_different_speaker_activity_does_not_reuse_a_peer_overview(self):
         self.complete("ar", "First recording")

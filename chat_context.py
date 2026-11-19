@@ -5,6 +5,7 @@ from bisect import bisect_right
 
 from inspect import getsource
 
+import personal_notes
 import writing_cache
 from local_qwen import MODEL_SHA, BUILD
 from session_notes import SOURCE_FORMAT_REVISION, passages
@@ -12,7 +13,11 @@ from session_notes import SOURCE_FORMAT_REVISION, passages
 POLICY = (
     " The saved overview is the note currently displayed to the user. For questions about its title, "
     "summary, headings or timeline, read the corresponding stored fields and quote exact wording when "
-    "requested. The timeline is chronological and its start values are seconds into the recording. "
+    "requested. Personal notes may supply additional facts or intentions even when the displayed overview is older. "
+    "latestPersonalNotes contains the user's own saved notes, separate from the displayed overview. "
+    "For the user's follow-ups, prefer latestPersonalNotes to older overviews and prior chat. "
+    "Attribute details found only there to My notes. Cite an audio passage only if it supports the same detail. "
+    "The timeline is chronological and its start values are seconds into the recording. "
     "For what people actually said, treat original transcript passages as authoritative; a summary "
     "or prior chat answer may be mistaken. Cite an original passage as [P12] using its actual integer "
     "ID. Read the current note in preference to earlier chat messages about a different note."
@@ -27,7 +32,7 @@ def snapshot(db, key):
     fingerprint = writing_cache.memo_key("displayed-note-v1", [
         row["lang"], body, row["generation"], row["status"] == "ready"
     ]) if body else None
-    return {"source": row["source_digest"], "note": body, "fingerprint": fingerprint}
+    return {"source": row["source_digest"], "note": body, "fingerprint": fingerprint, "personal": personal_notes.as_context(db, key)}
 
 
 def encoded(value):

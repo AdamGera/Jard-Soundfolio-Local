@@ -219,7 +219,14 @@ async function sendAudio(
   return response
 }
 
+export async function transcribeDictation(audio: Blob, languages: readonly string[], signal: AbortSignal): Promise<{ text: string }> {
+  if (!audio.size) throw new Error("No microphone audio was captured.")
+  const response = await sendAudio("/api/personal-notes/dictation", audio, languages, {}, signal)
+  return response.json()
+}
+
 export type SavedSession = {
+  personalNotes?: import("./personal-notes").PersonalNotes
   overview?: import("./overview").Overview | null
   id: string; name: string; created: string; status: "complete" | "interrupted" | "processing"
   languageHints: string[]; recording: boolean; diarization: boolean; live: boolean

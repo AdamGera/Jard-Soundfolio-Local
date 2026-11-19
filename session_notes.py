@@ -1,9 +1,11 @@
 """SQLite storage for derived notes. Transcripts and their source filenames stay immutable."""
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
+import personal_notes
 from writing_cache import memo_key
 
 SOURCE_FORMAT_REVISION = "timed-sentences-v1-weighted-language-v1"
@@ -36,10 +38,10 @@ CREATE TABLE IF NOT EXISTS chat_turns (
 
 def reuse_ready(db, key, target):
     """A copy belongs to the new session, so its audio, title and deletion stay independent."""
-    own = db.execute("SELECT status,generation FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+    own = db.execute("SELECT status,generation,queued_personal FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
     if own and own["status"] == "ready":
         return True
-    if (own and own["generation"]) or db.execute(
+    if (own and (own["generation"] or own["queued_personal"])) or db.execute(
         "SELECT 1 FROM notes JOIN overviews USING(id) WHERE notes.id=? AND lang=base AND generation>0", (key,)
     ).fetchone():
         return False
@@ -49,6 +51,8 @@ def reuse_ready(db, key, target):
                        AND n.revision=peer.revision JOIN overviews v ON v.id=peer.id
                        JOIN overviews b ON b.id=peer.id AND b.lang=peer.base AND b.generation=0
                        WHERE n.id=? AND n.revision=? AND peer.id!=n.id AND v.status='ready' AND v.generation=0 AND
+                       v.queued_personal='' AND v.published_personal='' AND
+                       coalesce(json_extract(v.body, '$.manuallyEdited'), 0)=0 AND
                        v.lang=CASE WHEN ?='und' THEN peer.base ELSE ? END
                        ORDER BY v.rowid LIMIT 1""",
         (key, PIPELINE_REVISION, target, target),
@@ -139,15 +143,18 @@ def initialize(db, key, *, refinalize=False):
         ((prior["source_digest"] if prior else None) or digest, key),
     )
     if row["size"]:
+        context = personal_notes.as_context(db, key)
         db.execute(
-            """INSERT INTO overviews(id,lang) VALUES(?,?) ON CONFLICT(id,lang) DO UPDATE SET status='queued'""",
-            (key, base),
+            """INSERT INTO overviews(id,lang,queued_personal) VALUES(?,?,?) ON CONFLICT(id,lang)
+                   DO UPDATE SET status='queued',queued_personal=excluded.queued_personal""",
+            (key, base, context),
         )
         reuse_ready(db, key, base)
         if pref != "auto" and pref != base:
             db.execute(
-                """INSERT INTO overviews(id,lang) VALUES(?,?) ON CONFLICT(id,lang) DO UPDATE SET status='queued'""",
-                (key, pref),
+                """INSERT INTO overviews(id,lang,queued_personal) VALUES(?,?,?) ON CONFLICT(id,lang)
+                   DO UPDATE SET status='queued',queued_personal=excluded.queued_personal""",
+                (key, pref, context),
             )
             reuse_ready(db, key, pref)
 
@@ -183,7 +190,7 @@ def queue_regeneration(db, key, target, note, scope):
         db.execute("DELETE FROM window_notes WHERE id=? AND part<0", (key,))
 
 
-def selection(db, key, lang=None, retry=False, *, regenerate=False):
+def selection(db, key, lang=None, retry=False, *, regenerate=False, update_personal=False):
     initialize(db, key)
     row = db.execute("SELECT * FROM notes WHERE id=?", (key,)).fetchone()
     if not row:
@@ -192,8 +199,16 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         target = row["base"] if lang == "auto" else lang
         db.execute("UPDATE notes SET preference=? WHERE id=?", (lang, key))
         if db.execute("SELECT 1 FROM overviews WHERE id=?", (key,)).fetchone():
-            db.execute("INSERT OR IGNORE INTO overviews(id,lang) VALUES(?,?)", (key, target))
-            if regenerate:
+            context = personal_notes.as_context(db, key)
+            db.execute("INSERT OR IGNORE INTO overviews(id,lang,queued_personal) VALUES(?,?,?)",
+                       (key, target, context))
+            if update_personal:
+                job = db.execute("SELECT status,body FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+                if job["status"] == "queued":
+                    raise RegenerationConflict("Wait for the current overview to finish.")
+                queue_regeneration(db, key, target, row, "overview" if job["body"] else None)
+                db.execute("UPDATE overviews SET queued_personal=? WHERE id=? AND lang=?", (context, key, target))
+            elif regenerate:
                 queue_regeneration(db, key, target, row, regenerate if isinstance(regenerate, str) else None)
             db.execute(
                 "UPDATE overviews SET status='queued' WHERE id=? AND lang=? AND status='stale'",
@@ -225,9 +240,9 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         )
     row = db.execute("SELECT * FROM notes WHERE id=?", (key,)).fetchone()
     target = row["base"] if row["preference"] == "auto" else row["preference"]
-    item = db.execute("SELECT status,error,scope FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+    item = db.execute("SELECT status,error,scope,published_personal,queued_personal FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
     display = db.execute(
-        "SELECT body FROM overviews WHERE id=? AND lang=?", (key, row["displayed"])
+        "SELECT body,generation FROM overviews WHERE id=? AND lang=?", (key, row["displayed"])
     ).fetchone()
     return {
         "preference": row["preference"],
@@ -236,14 +251,42 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         "status": item["status"] if item else "empty",
         "error": item["error"] if item else None,
         "scope": item["scope"] if item else None,
-        "version": json.loads(display[0]) if display else None,
+        "notesChanged": bool(item and item["published_personal"] != personal_notes.fingerprint(personal_notes.as_context(db, key))),
+        "updatingPersonal": bool(item and item["status"] == "queued" and item["scope"] == "overview"
+                                 and item["published_personal"] != personal_notes.fingerprint(item["queued_personal"])),
+        "version": json.loads(display["body"]) if display and display["body"] else None,
+        "editRevision": overview_edit_revision(display) if display and display["body"] else None,
     }
+
+
+OVERVIEW_CITATION = re.compile(r"⟦(\d+(?:\.\d+)?)⟧")
+
+
+def overview_edit_revision(row):
+    return memo_key("overview-edit-v1", [row["generation"], row["body"]])
+
+
+def edit_overview(db, key, language, revision, summary, markdown):
+    row = db.execute("SELECT status,body,generation FROM overviews WHERE id=? AND lang=?", (key, language)).fetchone()
+    if not row or not row["body"] or row["status"] == "queued":
+        raise RegenerationConflict("Wait until the overview is ready to edit.")
+    current = json.loads(row["body"])
+    existing_markdown = current.get("markdown") or ""
+    if current["summary"] == summary and existing_markdown == markdown:
+        return
+    if overview_edit_revision(row) != revision:
+        raise RegenerationConflict("The overview changed while you were editing. Reopen it to start from the latest version.")
+    if set(OVERVIEW_CITATION.findall(markdown)) - set(OVERVIEW_CITATION.findall(existing_markdown)):
+        raise ValueError("An edit can only use playback timestamps already present in this overview.")
+    current.update(summary=summary, markdown=markdown, manuallyEdited=True)
+    db.execute("UPDATE overviews SET body=? WHERE id=? AND lang=?",
+               (json.dumps(current, ensure_ascii=False), key, language))
 
 
 def publish(db, key, target, version):
     if not db.execute("SELECT 1 FROM notes WHERE id=?", (key,)).fetchone():
         return
-    progress = db.execute("SELECT generation,scope,body FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+    progress = db.execute("SELECT generation,scope,body,queued_personal,published_personal FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
     generation = progress[0] if progress else 0
     scope = progress["scope"] if progress else None
     if scope:
@@ -255,15 +298,22 @@ def publish(db, key, target, version):
                 saved[field] = version[field]
             else:
                 saved.pop(field, None)
+        if scope == "overview":
+            saved.pop("manuallyEdited", None)
         version = saved
+    context = progress["queued_personal"] if progress else ""
+    fingerprint = progress["published_personal"] if scope == "timeline" else personal_notes.fingerprint(context)
     actual = version["language"]
     if target == "und" and actual != target:
         db.execute("UPDATE notes SET base=? WHERE id=? AND base='und'", (actual, key))
         db.execute("DELETE FROM overviews WHERE id=? AND lang='und'", (key,))
     db.execute(
-        """INSERT INTO overviews(id,lang,status,title,body,generation) VALUES(?,?,'ready',?,?,?)
-         ON CONFLICT(id,lang) DO UPDATE SET status='ready',title=excluded.title,body=excluded.body,generation=excluded.generation,scope=NULL,error=NULL""",
-        (key, actual, version["title"], json.dumps(version, ensure_ascii=False), generation),
+        """INSERT INTO overviews(id,lang,status,title,body,generation,queued_personal,published_personal)
+           VALUES(?,?,'ready',?,?,?,?,?)
+         ON CONFLICT(id,lang) DO UPDATE SET status='ready',title=excluded.title,body=excluded.body,
+           generation=excluded.generation,scope=NULL,error=NULL,queued_personal=excluded.queued_personal,
+           published_personal=excluded.published_personal""",
+        (key, actual, version["title"], json.dumps(version, ensure_ascii=False), generation, context, fingerprint),
     )
     note = db.execute("SELECT base,preference FROM notes WHERE id=?", (key,)).fetchone()
     if generation and not scope and actual == note["base"]:

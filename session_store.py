@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import personal_notes
 import session_notes
 import writing_cache
 
@@ -100,6 +101,7 @@ class SessionStore:
             """)
             db.executescript(session_notes.SCHEMA)
             writing_cache.migrate(db)
+            personal_notes.migrate(db)
             db.execute("UPDATE chat_turns SET status='stopped' WHERE status='streaming'")
             db.execute("UPDATE sessions SET status='interrupted',error=? WHERE status='processing'",
                        ("Processing stopped when Jard Soundfolio Local closed.",))
@@ -126,7 +128,7 @@ class SessionStore:
             with db:
                 yield db
 
-    def create(self, source, name, mime, options, duration, *, key=None):
+    def create(self, source, name, mime, options, duration, *, key=None, notes_draft=None):
         key = key or str(uuid4())
         created = datetime.now(timezone.utc).isoformat()
         name = Path(name or "").name.strip()[:240] or ("Recording" if options["recording"] else "Audio")
@@ -145,6 +147,7 @@ class SessionStore:
             with self.connection() as db:
                 db.execute("""INSERT INTO sessions(id,name,created,filename,mime,options,duration)
                               VALUES (?,?,?,?,?,?,?)""", (key, name, created, filename, mime, encode(options), duration))
+                personal_notes.attach(db, key, notes_draft)
         except BaseException:
             if (folder / filename).exists():
                 os.replace(folder / filename, source)
@@ -200,7 +203,7 @@ class SessionStore:
         overview = session_notes.selection(db, key)
         options = json.loads(row["options"])
         return {**{k: row[k] for k in ("id", "name", "created", "duration", "processed", "status")},
-                **options, "overview": overview,
+                **options, "overview": overview, "personalNotes": personal_notes.get(db, key),
                 "name": overview["version"]["title"] if overview and overview["version"] else row["name"],
                 "audioName": row["name"] + Path(row["filename"]).suffix if options["recording"] else row["name"],
                 "audioPath": f"audio/{key}/{row['filename']}", "audioUrl": f"/api/sessions/{key}/audio"}

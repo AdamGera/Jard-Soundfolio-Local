@@ -26,14 +26,15 @@ function applyWindowChrome(chrome: WindowChrome) {
 
 type CaptureOptions = { diarization: boolean; languages: string[] }
 export type RecordingDraft = { id: string; seconds: number }
-type ActiveCapture = { mode: RecordingMode; live: boolean; seconds?: number; text?: string; segments?: SpeakerSegment[] }
+type ActiveCapture = { dictation?: string; mode: RecordingMode; live: boolean; seconds?: number; text?: string; segments?: SpeakerSegment[] }
 type Requests = {
   permission: { source: CaptureSource; prompt: boolean }
   openPrivacy: { source: CaptureSource }
   revealApp: undefined
   devices: undefined
-  record: CaptureOptions & { mode: RecordingMode; live: boolean }
+  record: CaptureOptions & { mode: RecordingMode; live: boolean; dictation?: string }
   stop: undefined
+  dictation: { action: "stop" | "cancel" | "discard" | "transcribe"; id: string; languages?: string[] }
   live: { enabled: boolean }
   openAudio: CaptureOptions
   recover: CaptureOptions & { id: string }
@@ -47,6 +48,7 @@ type Responses = {
   devices: { microphone: string; capture?: ActiveCapture | null; drafts?: RecordingDraft[] }
   record: unknown
   stop: unknown
+  dictation: { text: string } | null
   live: unknown
   openAudio: { id: string } | null
   recover: { id: string }
@@ -57,15 +59,16 @@ export type DesktopBridge = {
   request<A extends keyof Requests>(action: A, ...args: Requests[A] extends undefined ? [] : [Requests[A]]): Promise<Responses[A]>
 }
 
-export type DesktopCaptureEvent =
+export type DesktopCaptureEvent = { dictation?: string } & (
   | { event: "started"; mode: RecordingMode; microphone: string }
   | { event: "levels"; seconds: number; mic: number; system: number; microphone?: string }
   | { event: "sourceChanged"; microphone: string; message: string }
   | { event: "preview"; text: string; segments?: SpeakerSegment[] }
   | { event: "finished"; reason?: string }
-  | { event: "accepted"; id: string }
+  | { event: "accepted" | "dictationReady"; id: string }
   | { event: "warning"; message: string }
   | { event: "error"; message: string; permission?: CaptureSource }
+)
 
 declare global {
   interface Window {
