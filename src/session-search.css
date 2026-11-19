@@ -1,0 +1,90 @@
+.session-search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgb(14 14 20 / 26%);
+}
+
+.session-search-dialog {
+  position: fixed;
+  z-index: 61;
+  top: 44%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: min(28rem, 78svh);
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--foreground);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 20px 65px rgb(0 0 0 / 18%), 0 2px 8px rgb(0 0 0 / 8%);
+}
+
+.session-search-input {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: .65rem;
+  min-height: 3rem;
+  padding: 0 .95rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.session-search-input > svg, .session-search-option > svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--quiet);
+}
+
+.session-search-input input {
+  flex: 1;
+  min-width: 0;
+  height: 3rem;
+  outline: none;
+  background: transparent;
+  font-size: .95rem;
+}
+
+.session-search-input input::placeholder, .session-search-option small,
+.session-search-label, .session-search-message, .session-search-escape {
+  color: var(--quiet);
+}
+
+.session-search-escape {
+  padding: 0 .3rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: .7rem;
+}
+
+.session-search-results {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .4rem;
+}
+
+.session-search-option {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  min-height: 2.55rem;
+  padding: .25rem .6rem;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: .875rem;
+}
+
+.session-search-option[aria-selected="true"] { background: var(--soft-surface); }
+.session-search-option[aria-disabled="true"] { cursor: default; opacity: .6; }
+.session-search-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-search-option small { flex: none; margin-left: auto; font-size: .7rem; }
+.session-search-label, .session-search-message { padding: .6rem; font-size: .75rem; }
+.session-search-message button { text-decoration: underline; }
+
+@media (max-width: 420px) {
+  .session-search-option small { display: none; }
+}

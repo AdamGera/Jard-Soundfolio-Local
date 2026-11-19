@@ -1,5 +1,7 @@
+import { useState } from "react"
 import { FileAudio, FileJson, Mic } from "lucide-react"
 
+import { desktopBridge } from "@/desktop"
 import type { SavedSession, Transcript } from "@/audio"
 import { Button } from "@/components/ui/button"
 
@@ -58,19 +60,33 @@ function downloadTranscript(item: DownloadItem) {
 }
 
 export function Downloads({ item, compact = false }: { item: DownloadItem | null; compact?: boolean }) {
+  const [exportError, setExportError] = useState("")
   if (!item) return null
+  const bridge = item.saved ? desktopBridge() : undefined
+  const sessionId = item.id
+  async function exportSaved(kind: "audio" | "json") {
+    setExportError("")
+    try {
+      await bridge!.request("export", { id: sessionId, kind })
+    } catch (reason) {
+      setExportError(reason instanceof Error ? reason.message : "Could not save the export.")
+    }
+  }
+
   return <section className={compact ? "compact-downloads" : "downloads"} aria-label="Session downloads">
     <div className={compact ? undefined : "current-file"}>
       {!compact && <><span className="download-source" aria-hidden="true">{item.recording ? <Mic /> : <FileAudio />}</span>
       <span className="download-name" title={item.audioName || item.name} dir="auto">{item.audioName || item.name}</span></>}
       <div className="download-actions">
-        {item.audioUrl ? <Button asChild variant="ghost" size="icon-sm">
+        {bridge && item.audioUrl ? <Button variant="ghost" size="icon-sm" aria-label={`Download audio for ${item.name}`}
+          title="Download audio" onClick={() => void exportSaved("audio")}><FileAudio /></Button> : item.audioUrl ? <Button asChild variant="ghost" size="icon-sm">
           <a href={item.audioUrl} download={item.audioName || item.name} aria-label={`Download audio for ${item.name}`} title="Download audio"><FileAudio /></a>
         </Button> : item.audio && <Button variant="ghost" size="icon-sm" aria-label={`Download audio for ${item.name}`}
           title="Download audio" onClick={() => downloadAudio(item.audio!, item.name)}><FileAudio /></Button>}
         {item.transcript && <Button variant="ghost" size="icon-sm" aria-label={`Download JSON transcript for ${item.name}`}
-          title="Download transcript as JSON" onClick={() => downloadTranscript(item)}><FileJson /></Button>}
+          title="Download transcript as JSON" onClick={() => bridge ? void exportSaved("json") : downloadTranscript(item)}><FileJson /></Button>}
       </div>
     </div>
+    {exportError && <p role="alert" className="feedback">{exportError}</p>}
   </section>
 }

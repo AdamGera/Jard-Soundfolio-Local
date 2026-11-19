@@ -31,7 +31,7 @@ LOG = logging.getLogger("uvicorn.error")
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 # window_notes uses nonnegative indices for chronological transcript windows.
-BRIEF, TITLE, SUMMARY, CHAPTERS = -1, -2, -3, -4
+GUIDE, TITLE, SUMMARY, CHAPTERS = -1, -2, -3, -4
 CITATION = re.compile(r"\[P(\d+)\]")
 
 
@@ -45,7 +45,17 @@ def array(items, limit):
 
 TOPIC = obj(quote=STRING, id=INTEGER, label=STRING, detail=STRING)
 MAP = obj(summary=STRING, topics=array(TOPIC, 4))
-SUMMARY_SCHEMA = obj(lead={"type": "string", "maxLength": 340}, markdown={"type": "string", "maxLength": 1750})
+GUIDE_SCHEMA = obj(topics=array(INTEGER, 8), writerPrompt=STRING)
+OVERVIEW_POLICY = (
+    "You are the editor of this recording. The complete chronological transcript is the authority. "
+    "Use the speakers' original words as evidence. Treat editing directions as fallible. A suggested "
+    "action is a proposal until explicitly accepted. A date mentioned as an option is not a rescheduling. "
+    "Distinguish disagreement from consensus and anecdotes from facts about the speakers. When speech "
+    "recognition breaks down, omit uncertain identities, numbers and stories. Cover the clear topics "
+    "once each. Speaking time measures participation, never rank, expertise or assent."
+)
+# Timeline and chat use bounded retrieval independently of the full-transcript overview.
+TIMELINE_SOURCE_TOKENS = 4700
 IDENTIFY = (
     "Read this chronological source. Extract specific factual developments, including names, numbers, "
     "conditions and final decisions. Write two compact sentences of summary and at most four topics. "
@@ -83,6 +93,9 @@ def markdown_summary(value, rows=(), locale=""):
             if not sentence:
                 continue
             sentence = ground_quantities(sentence, rows, locale) if rows else sentence
+            # Spoken disfluencies copied into generated prose, including code-switched text.
+            sentence = re.sub(r"(?<!\w)([^\W\d_]+(?: +[^\W\d_]+){0,2})(?: +\1){2,}(?!\w)",
+                              r"\1", sentence, flags=re.IGNORECASE)
             normalized = unicodedata.normalize("NFKD", sentence.casefold())
             plain = "".join(c for c in normalized if not unicodedata.combining(c))
             key = " ".join(re.findall(r"[^\W_]+", plain))
@@ -143,9 +156,8 @@ def validate_checkpoint(part, value):
             raise ValueError("Title exceeds five words.")
     elif part == SUMMARY:
         markdown_summary(value)
-    elif part == BRIEF:
-        clean(value["understanding"])
-        clean(value["writing_brief"])
+    elif part == GUIDE:
+        local_qwen.check_structure(value, GUIDE_SCHEMA)
     elif part == CHAPTERS:
         if not value or sorted({t["id"] for t in value}) != [t["id"] for t in value]:
             raise ValueError("Invalid chapter order.")
@@ -369,7 +381,8 @@ class Insights:
         """Consolidate very long outlines in chronological batches, retaining source IDs."""
         render = lambda items: json.dumps(items, ensure_ascii=False, separators=(",", ":"))
         current = notes
-        while current and await self.model.tokens(render(current)) > 4100:
+        size = await self.model.tokens(render(current)) if current else 0
+        while size > 4100:
             merged = []
             async for group in self.groups(current, render, 3600):
                 data = await self.model.structured(IDENTIFY, group, MAP, 500)
@@ -377,7 +390,10 @@ class Insights:
                 anchors.update(n["first"] for n in group)
                 data["topics"] = anchored_topics(data["topics"], [r for r in rows if r["id"] in anchors], include_quote=True)
                 merged.append({"first": group[0]["first"], "last": group[-1]["last"], **data})
-            current = merged
+            next_size = await self.model.tokens(render(merged))
+            if next_size >= size:
+                raise RuntimeError("The transcript outline could not be shortened to fit the local model.")
+            current, size = merged, next_size
         return current
 
     async def short_title(self, value, language):
@@ -391,74 +407,157 @@ class Insights:
             title = title_words.title_text(clean(retry["shortTitle"]))
         return title_words.compact_title(title, locale)
 
-    async def short_summary(self, rows, evidence, language, brief, locale):
-        # For a handful of sentences, a verbatim key point is shorter and more reliable than a paraphrase.
-        # The editor still selects the important facts, their order and their heading.
-        source = {r["id"]: re.sub(r"^Speaker [^:]{1,30}:\s*", "", r["text"]).strip() for r in rows}
-        schema = obj(mainPassage=INTEGER, heading=STRING, supportingPassages=array(INTEGER, 4))
+    async def timeline_source(self, key, rows, expected):
+        def source_text(material):
+            return source_messages(material)[1]["content"]
 
-        def check(selection):
-            if selection["mainPassage"] not in source or any(i not in source for i in selection["supportingPassages"]):
-                raise ValueError("Choose only passage IDs present in the source.")
-            validate_language([selection["heading"]], locale)
+        transcript = excerpts(rows)
+        if await self.model.tokens(source_text(transcript)) <= TIMELINE_SOURCE_TOKENS:
+            return transcript
 
-        def partial(v):
-            main = source.get(v.get("mainPassage"), "")
-            lines = [source[i] for i in dict.fromkeys(v.get("supportingPassages", [])) if i in source and source[i] != main]
-            body = "\n".join("- " + line for line in lines)
-            heading = v.get("heading")
-            note_stream.patch(summary=main, markdown=(f"## {heading}\n\n" if heading and body else "") + body)
+        _, notes = await self.outline(key, rows, expected)
+        anchors = {rows[0]["id"], rows[-1]["id"]}
+        anchors.update(topic["id"] for note in notes for topic in note["topics"])
+        for note in notes:
+            anchors.update((note["first"], note["last"]))
+        candidates = [row for row in rows if row["id"] in anchors]
 
-        edit = await self.model.structured(
-            f"Edit a very short recording into a concise note in {language}. Select the one passage containing "
-            "the most important final decision or finding as the lead. Select only the supporting passages "
-            "needed to understand it, in the best reading order. Give those details a short descriptive heading. "
-            "Use the actual integer passage IDs from the recording.", evidence, schema, 120, context=brief, validate=check, on_partial=partial)
-        main = edit["mainPassage"]
-        support = [source[i] for i in dict.fromkeys(edit["supportingPassages"]) if i != main]
-        return {"lead": source[main], "sections": [{"heading": edit["heading"], "points": support}] if support else []}
+        # If each window’s boundaries and topic anchors fit, use the original words directly.
+        # A paraphrased window summary can otherwise turn an early suggestion into a decision.
+        source = {"transcriptExcerpts": excerpts(candidates)}
+        if notes and await self.model.tokens(source_text(source)) <= TIMELINE_SOURCE_TOKENS:
+            return source
+        coverage = await self.condensed(notes, rows)
 
-    async def write(self, key, rows, evidence, language, expected):
-        # The brief is generated from the recording. It determines what should be emphasized in the note.
+        # Spread original passages across the recording, including its conclusion.
+        # The outline still represents every window, even where a full quotation cannot fit.
+        count = len(candidates)
+        while True:
+            selected = [candidates[i * (len(candidates) - 1) // max(1, count - 1)] for i in range(count)]
+            text = excerpts(selected)
+            evidence = {"coverageNotes": coverage, "transcriptExcerpts": text}
+            if await self.model.tokens(source_text(evidence)) <= TIMELINE_SOURCE_TOKENS:
+                return evidence
+            if count <= 2:
+                # A legacy passage can contain a whole audio block. Keep both ends verbatim.
+                width = min(512, len(text) // 2)
+                while width:
+                    evidence["transcriptExcerpts"] = text[:width] + "\n…\n" + text[-width:]
+                    if await self.model.tokens(source_text(evidence)) <= TIMELINE_SOURCE_TOKENS:
+                        return evidence
+                    width //= 2
+                raise ValueError("The timeline source exceeds the local model context.")
+            count = max(2, count // 2)
+
+    async def write_overview(self, key, rows, language, expected):
         locale = next(code for code, name in LANGUAGES.items() if name == language)
-        brief = await self.checkpoint(key, BRIEF, lambda: self.model.structured(
-            f"Write the understanding and instructions in {language}. Identify what this recording actually is, its subject and outcome. Then write your own short "
-            "editorial brief telling a writer which distinct, useful facts matter for this particular recording. "
-            "Repeated mentions are one point. For a narrow subject, a short answer is enough. "
-            "Use one sentence for the understanding and two short sentences for the instructions. Preserve uncertainty. Never assume this was a meeting or invent tasks, agreements or participants.",
-            evidence, obj(understanding={"type": "string", "maxLength": 180},
-                          writing_brief={"type": "string", "maxLength": 270}), 480), expected)
+        transcript = excerpts(rows)
+
+        # Both calls share the same immutable source and system message for prefix-cache reuse.
+        policy = OVERVIEW_POLICY + f" Write the finished overview in {language}."
+        with self.store.connection() as db:
+            analytics = session_notes.speaker_context(db, key)
+        short = len(transcript) <= 600 and len(transcript.split()) <= 85
+        count = min(len(rows), 1 if short else min(6, 2 + int(rows[-1]["start"] // 180)))
+        fields = [f"anchor{i + 1}" for i in range(count)]
+        # Give the planner a few substantive options spread through each interval. Its
+        # full source remains intact. Repeated ASR filler contributes little vocabulary.
+        candidates = {}
+        for i, field in enumerate(fields):
+            region = rows[len(rows) * i // count:len(rows) * (i + 1) // count]
+            n = min(4, len(region))
+            choices = [region[len(region) * j // n:len(region) * (j + 1) // n] for j in range(n)]
+            candidates[field] = [max(group, key=lambda r: len(set(r["text"].casefold().split()[:65])))
+                                 for group in choices]
+        anchor_schema = {field: {"type": "integer", "enum": [r["id"] for r in options]}
+                         for field, options in candidates.items()}
+
+        async def plan():
+            result = await self.model.structured(
+                "Choose a clear, substantive utterance from each recording interval. Return its passage ID "
+                "in the matching anchor field. In writerPrompt give one short editorial direction about "
+                "what to emphasize or group. Keep proposals and contrary replies together. Use the measured "
+                "speaker count and speaking times for perspective. Shares divide total speaking time and count "
+                "overlap for each speaker. Give brief but substantive remarks their due.",
+                transcript, obj(**anchor_schema, writerPrompt=STRING), 430,
+                context={"speakerAnalytics": analytics, "passageOptions": {field: excerpts(options)
+                         for field, options in candidates.items()}}, policy=policy, full_context=True)
+            return {"topics": [result[f] for f in fields], "writerPrompt": result["writerPrompt"]}
+
+        guide = await self.checkpoint(key, GUIDE, plan, expected)
+
+        def render(value):
+            if short:
+                return {"lead": value.get("lead", ""), "markdown": ""}
+            points = [value[f].strip() for f in fields if value.get(f, "").strip()]
+            return {"lead": points[0] if points else "", "markdown": "\n".join("- " + p for p in points[1:])}
+
+        def check_note(value):
+            note = render(value)
+            validate_language([note["lead"], *([note["markdown"]] if note["markdown"] else [])], locale)
+
+        async def draft():
+            evidence = {f: excerpts([r for r in rows if abs(r["id"] - anchor) <= 2])
+                        for f, anchor in zip(fields, guide["topics"], strict=True)}
+            optional_text = {"type": "string", "minLength": 0}
+            schema = obj(lead=STRING) if short else obj(**dict.fromkeys(fields, optional_text))
+            task = ("Write a single sentence." if short else
+                    "For each anchor give one short, concrete sentence about the subject in that excerpt. "
+                    "Paraphrase into natural written language. Use the full transcript for context. Leave the field empty "
+                    "for garbled speech or a subject already covered. Avoid inferred causes, identities and "
+                    "general lessons. No labels or passage IDs in the answer.")
+
+            def preview(value):
+                note = render(value)
+                note_stream.patch(summary=note["lead"], markdown=note["markdown"])
+            instruction = (guide["writerPrompt"] + "\n\n" + task +
+                           " Report each excerpt on its own terms, including subjects outside the suggested focus. "
+                           "Keep a suggestion tentative unless a later speaker expressly accepts the same action. "
+                           "Retain conditions, objections and unresolved questions.")
+            result = await self.model.structured(
+                instruction, transcript, schema, 220 if short else 1400,
+                context={"speakerAnalytics": analytics, "topicEvidence": evidence},
+                policy=policy, full_context=True, validate=check_note, on_partial=preview)
+            note = render(result)
+            if short and note["lead"].endswith(("?", "؟", "？")):
+                # If the writer merely echoes the question, retain the actual brief response.
+                utterances = [re.sub(r"^Speaker [A-Z]:\s*", "", r["text"]).strip() for r in rows]
+                for i, line in enumerate(utterances[:-1]):
+                    if line.casefold() == note["lead"].casefold():
+                        reply = " ".join(utterances[i + 1:])
+                        try:
+                            validate_language([reply], locale)
+                        except ValueError:
+                            break
+                        note["lead"] += " " + reply
+                        break
+            return note
+
+        written = await self.checkpoint(key, SUMMARY, draft, expected)
+        summary = markdown_summary(written, rows if short else (), locale)
+        note_stream.patch(**summary)
+        return summary
+
+    async def write(self, key, rows, language, expected):
+        locale = next(code for code, name in LANGUAGES.items() if name == language)
+        summary = await self.write_overview(key, rows, language, expected)
+
         async def name_session():
             result = await self.model.structured(
-                f"Name this recording in {language}. Use the shortest specific title. Aim for one to four words. Five words is the absolute maximum. "
-                "Give its specific subject as a plain, natural title. Omit generic labels, quotation marks and subtitles.",
-                evidence, obj(title=STRING), 65, context=brief, validate=lambda v: validate_language([v["title"]], locale),
+                f"Name this recording in {language}. Use the shortest specific title. Aim for one to four "
+                "words, five at most. Omit generic labels, quotation marks and subtitles.",
+                summary, obj(title=STRING), 65, validate=lambda v: validate_language([v["title"]], locale),
                 on_partial=lambda v: note_stream.patch(title=v.get("title", "")))
             return {"title": await self.short_title(result["title"], language)}
 
         title = await self.checkpoint(key, TITLE, name_session, expected)
         note_stream.patch(title=title["title"])
 
-        async def draft():
-            if 1 < len(rows) <= 5 and len(excerpts(rows)) <= 650:
-                return await self.short_summary(rows, evidence, language, brief, locale)
-            return await self.model.structured(
-                f"Write a useful, direct note in {language}, as if answering someone who asked what the "
-                "recording says. Put the main point in one short lead. Write the remaining distinct details "
-                "as natural Markdown: a paragraph often suffices. Add bullets or a heading only when they "
-                "help the reader. Report each idea once in the whole note, even if several speakers or source "
-                "windows repeat it. Stop when you run out of new information. If the lead says everything, "
-                "return that same sentence as markdown. Ground every claim in the evidence. Keep quantities "
-                "attached to the right objects, distinguish proposals from decisions, and preserve uncertainty "
-                "and conditions. Omit passage numbers. Use the editorial brief to choose what matters.",
-                evidence, SUMMARY_SCHEMA, 1150, context=brief,
-                validate=lambda v: validate_language([v["lead"], v["markdown"]], locale),
-                on_partial=lambda v: note_stream.patch(summary=v.get("lead", ""), markdown=v.get("markdown", "")))
+        async def chapters():
+            evidence = await self.timeline_source(key, rows, expected)
+            return await self.timeline(rows, evidence, language, title["title"], summary["summary"])
 
-        written = await self.checkpoint(key, SUMMARY, draft, expected)
-        summary = markdown_summary(written, rows, locale)
-        note_stream.patch(**summary)
-        topics = await self.checkpoint(key, CHAPTERS, lambda: self.timeline(rows, evidence, language, title["title"], summary["summary"]), expected)
+        topics = await self.checkpoint(key, CHAPTERS, chapters, expected)
         note_stream.patch(topics=topics)
         return {"title": clean(title["title"]), **summary, "topics": topics}
 
@@ -579,30 +678,17 @@ class Insights:
                 LOG.info("Keeping original descriptions for %d timeline chapters.", len(batch))
         return chapters
 
-    async def localize(self, original, language, rows):
+    async def localize_metadata(self, original, language):
         source_language = LANGUAGES.get(original.get("language"), "the source language")
         words = f"Translate the provided writing from {source_language} into {language}. Use fluent {language} for all output. "
-        fields = {k: original[k] for k in ("title", "summary", "markdown") if original.get(k)}
         locale = next(code for code, name in LANGUAGES.items() if name == language)
-        translated_keys = {"title": "translatedTitle", "summary": "translatedLead", "markdown": "translatedMarkdown"}
-
-        def partial_note(v):
-            note_stream.patch(**{k: v.get(translated_keys[k], "") for k in fields})
-
-        def check_note(result):
-            validate_translation(fields.values(), [result[translated_keys[k]] for k in fields], locale)
-
-        translated = await self.model.structured(
-            words + "Translate each source field once into its corresponding field, preserving its meaning "
-            "and Markdown formatting. Add no new points or examples. Keep every name, date and quantity. "
-            "Keep the title specific and short: one to four words, five at most.",
-            {("sourceLead" if k == "summary" else "source"+k.title()): value for k, value in fields.items()},
-            obj(**{translated_keys[k]: STRING for k in fields}), 1500, validate=check_note, on_partial=partial_note)
-        version = {k: clean(translated[translated_keys[k]]) for k in fields}
-        version.update(markdown_summary({"lead": version["summary"], "markdown": version.get("markdown", "")}))
-        version["title"] = await self.short_title(version["title"], language)
-        note_stream.patch(**version)
-        version["topics"] = []
+        title = await self.model.structured(
+            words + "Translate only this session title. Keep it specific and short, one to four words, five at most.",
+            original["title"], obj(translatedTitle=STRING), 65,
+            validate=lambda v: validate_translation([original["title"]], [v["translatedTitle"]], locale),
+            on_partial=lambda v: note_stream.patch(title=v.get("translatedTitle", "")))
+        version = {"title": await self.short_title(clean(title["translatedTitle"]), language), "topics": []}
+        note_stream.patch(title=version["title"])
         # The model translates strings. The application owns chapter identity, order and timestamps.
         for start in range(0, len(original["topics"]), 4):
             batch = original["topics"][start:start + 4]
@@ -643,11 +729,14 @@ class Insights:
                     {"excerpts": excerpts(sample), "catalog": LANGUAGES}, obj(code={"type": "string", "enum": list(LANGUAGES)}), 40)
                 code = detected["code"]
             if target != base:
-                version = await self.localize(json.loads(parent[0]), LANGUAGES[code], rows)
+                # Each language gets an overview of the original conversation. Only the short
+                # title and timestamped chapter labels/descriptions come from the base version.
+                language = LANGUAGES[code]
+                summary = await self.write_overview(key, rows, language, expected, checkpoint_stages=False)
+                metadata = await self.localize_metadata(json.loads(parent[0]), language)
+                version = {**summary, **metadata}
             else:
-                _, notes = await self.outline(key, rows, expected)
-                evidence = await self.condensed(notes, rows) if notes else excerpts(rows)
-                version = await self.write(key, rows, evidence, LANGUAGES[code], expected)
+                version = await self.write(key, rows, LANGUAGES[code], expected)
             with self.store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 note_identity(db, key, expected)

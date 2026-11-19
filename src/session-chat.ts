@@ -31,6 +31,12 @@ export function useSessionChat(id?: string) {
     chat.clearError()
     void chat.sendMessage({ text: question })
   }
+  useEffect(() => {
+    const reload = () => setRefresh(value => value + 1)
+    window.addEventListener("focus", reload)
+    return () => window.removeEventListener("focus", reload)
+  }, [])
+
   const submitQueued = useEffectEvent(submit)
 
   useEffect(() => {

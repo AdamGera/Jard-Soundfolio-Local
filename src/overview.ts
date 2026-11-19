@@ -50,7 +50,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
   const status = value?.status
   const target = value?.target
   useEffect(() => {
-    if (!id || requesting || (status && status !== "queued")) return
+    if (!id || requesting) return
     let reading: AbortController | undefined
     let stream: EventSource | undefined
     let timer = 0
@@ -102,8 +102,10 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       timer = window.setTimeout(poll, stream?.readyState === 1 ? 4500 : 1400)
     }
     if (status === "queued" && target) connect(target)
-    timer = window.setTimeout(poll, status ? 900 : 0)
+    if (!status || status === "queued") timer = window.setTimeout(poll, status ? 900 : 0)
+    window.addEventListener("focus", poll)
     return () => {
+      window.removeEventListener("focus", poll)
       disposed = true
       reading?.abort()
       stream?.close()

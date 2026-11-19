@@ -24,13 +24,14 @@ type Props = {
 const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
 
 export function ResultsPanel({ result, session, source, tab, onTab, working, recording, emptyText, progress, copied, onCopy }: Props) {
-  const player = usePlayback(source, result.durationSeconds)
   const complete = session?.status === "complete"
   const overview = useOverview(complete ? session.id : undefined, session?.overview, tab === "overview" || tab === "timeline")
   const writing = overview.value
   const version = overview.version
   const [citation, setCitation] = useState<{ seconds: number } | null>(null)
   const [dock, setDock] = useState<"audio" | "chat" | "expanded" | null>(null)
+  const openPlayer = useCallback(() => setDock("audio"), [])
+  const player = usePlayback(source, result.durationSeconds, openPlayer)
   const audioTrigger = useRef<HTMLButtonElement>(null)
   const toggleChat = useCallback((open: boolean) => setDock(open ? "chat" : null), [])
   const resizeChat = useCallback(() => setDock(current => current === "expanded" ? "chat" : "expanded"), [])
@@ -73,7 +74,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     document.addEventListener("keydown", find)
     return () => document.removeEventListener("keydown", find)
   }, [tab, result.text, recording, working])
-  const { seek } = player
+  const { seek, ready, wave: waveRef } = player
   const cite = useCallback((seconds: number) => {
     setDock(null)
     changeTab("transcript")
@@ -158,7 +159,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
         {noteStatus}
         {timeline && <ol className="topic-list" aria-label="Topic timeline" lang={timeline.language}>
           {timeline.topics.map((topic,i) => <li key={i}>
-            <button disabled={!player.ready || topic.start == null} aria-current={i === chapter ? "time" : undefined}
+            <button disabled={!ready || topic.start == null} aria-current={i === chapter ? "time" : undefined}
               aria-label={topic.start == null ? topic.label : `Play ${topic.label} at ${clock(topic.start)}`}
               onClick={() => { if (topic.start != null) player.seek(topic.start, true) }}>
               <time dir="ltr">{topic.start != null ? clock(topic.start) : "…"}</time><span dir="auto"><strong>{topic.label}</strong>
@@ -169,13 +170,13 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
       </TabsContent>}
       <TabsContent value="transcript" className={result.text ? "transcript-body has-text" : "transcript-body"}
         ref={area} onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
-        {result.text ? <Suspense fallback={null}><TimedTranscript result={result} time={player.time} ready={player.ready} seek={player.seek} citation={citation} matches={matches} activeMatch={currentMatch} /></Suspense> :
+        {result.text ? <Suspense fallback={null}><TimedTranscript result={result} time={player.time} ready={ready} seek={player.seek} citation={citation} matches={matches} activeMatch={currentMatch} /></Suspense> :
           <div className="empty-state"><span className="empty-icon" data-working={working} aria-hidden="true"><AudioLines /></span>
             {working ? progress : <p>{emptyText}</p>}
           </div>}
       </TabsContent>
       <TabsContent value="analytics" className="analytics-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
-        <Suspense fallback={null}><SpeakerAnalytics result={result} time={player.time} ready={player.ready} seek={player.seek} /></Suspense>
+        <Suspense fallback={null}><SpeakerAnalytics result={result} time={player.time} ready={ready} seek={player.seek} /></Suspense>
       </TabsContent>
       {working && result.text && <div className="processing-footer">{progress}</div>}
       {!complete && source && <AudioPlayer player={player} />}
@@ -188,13 +189,13 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
         <Button ref={audioTrigger} className="audio-launcher" variant="outline" aria-expanded={dock === "audio"}
           data-playing={player.advancing} aria-controls="session-audio-player" title={dock === "audio" ? "Close audio player" : "Open audio player"}
           aria-label={dock === "audio" ? "Close audio player" : "Open audio player"} onClick={() => setDock(dock === "audio" ? null : "audio")}>
-          <span className="playback-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span><ChevronUp aria-hidden="true" />
+          <span ref={waveRef} className="playback-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span><ChevronUp aria-hidden="true" />
         </Button>
       </>}
       {result.text && <Suspense fallback={<button className="chat-launcher" disabled>Opening conversation…</button>}>
         <SessionChat id={session.id} open={dock === "chat" || dock === "expanded"} expanded={dock === "expanded"}
           onOpen={toggleChat} onExpand={resizeChat}
-          ready={player.ready} cite={cite} />
+          ready={ready} cite={cite} />
       </Suspense>}
     </footer>}
   </div>

@@ -1,0 +1,17 @@
+Jard Soundfolio Local model acknowledgments
+
+The app downloads model data on request. Each file's exact revision, source URL and SHA-256 digest is recorded in models.json beside the setup program.
+
+Reson8 Rumble-2-Flash, including its CTC alignment weights
+Apache License 2.0. The download includes LICENSE and the model card.
+https://huggingface.co/Reson8/Rumble-2-Flash/tree/92ec9141fb1178c5e77fd0020fe86a33c355060b
+
+NVIDIA Nemotron-3-Diarization
+OpenMDW License Agreement v1.1. The model card is included in the download.
+https://huggingface.co/nvidia/Nemotron-3-Diarization/tree/52a432672732425e4c19765b9fec9b5810e6f4ba
+https://openmdw.ai/license/1-1/
+
+Qwen3.5-2B, Q8_0 GGUF quantization by axteam
+Apache License 2.0. Original model by the Qwen Team.
+https://huggingface.co/axteam/Qwen3.5-2B-GGUF/tree/271502ee0817e5f4ac3242ae5b1d334f74939871
+https://huggingface.co/Qwen/Qwen3.5-2B

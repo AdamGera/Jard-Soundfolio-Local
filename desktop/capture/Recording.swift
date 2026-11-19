@@ -102,6 +102,8 @@ final class WaveSink {
     }
 
     func finish() throws {
+        // Discard any tail from a partially failed write before advertising the final length.
+        try file.truncate(atOffset: UInt64(44 + frames * 2))
         try checkpoint()
         try file.synchronize()
         try file.close()

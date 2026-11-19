@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
 import { Pause, Play, RotateCcw, RotateCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { createPlaybackWaveform } from "@/playback-waveform"
 import { clock } from "@/speaker-activity"
 
-export function usePlayback(source: Blob | string | null, transcriptDuration: number | null) {
+export function usePlayback(source: Blob | string | null, transcriptDuration: number | null, onStart: () => void) {
   const audio = useRef<HTMLAudioElement>(null)
+  const wave = useRef<HTMLSpanElement>(null)
+  const meter = useRef<ReturnType<typeof createPlaybackWaveform> | null>(null)
   const [time, setTime] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [advancing, setAdvancing] = useState(false)
@@ -13,6 +16,21 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
   const [error, setError] = useState("")
   const duration = mediaDuration || transcriptDuration || 0
 
+  const prepareMeter = useCallback((el: HTMLAudioElement) => {
+    if (!wave.current || typeof AudioContext === "undefined") return
+    try {
+      if (meter.current?.element !== el) {
+        meter.current?.close()
+        meter.current = createPlaybackWaveform(el)
+      }
+      void meter.current.connect().catch(() => {})
+    } catch { /* Playback still works if audio analysis is unavailable. */ }
+  }, [])
+  useEffect(() => () => {
+    meter.current?.close()
+    meter.current = null
+  }, [])
+
   useEffect(() => {
     const el = audio.current
     if (!el || !source) return
@@ -20,6 +38,7 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
     function release() {
       if (url.startsWith("blob:")) URL.revokeObjectURL(url)
     }
+    let started = false
     let preparing = false
     const abort = new AbortController()
     const options = { signal: abort.signal }
@@ -30,10 +49,12 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
       if (now - lastFrame >= 24) {
         lastFrame = now
         sync()
+        if (wave.current) meter.current?.draw(wave.current.children)
       }
       if (!el.paused) frame = requestAnimationFrame(tick)
     }
     function pause() {
+      started = false
       cancelAnimationFrame(frame)
       sync()
       setAdvancing(false)
@@ -73,6 +94,11 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
       setAdvancing(false)
     }, options)
     el.addEventListener("playing", () => {
+      if (!started) {
+        started = true
+        onStart()
+        prepareMeter(el)
+      }
       cancelAnimationFrame(frame)
       setError("")
       setAdvancing(true)
@@ -89,13 +115,20 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
       el.load()
       release()
     }
-  }, [source])
+  }, [source, onStart, prepareMeter])
 
   const play = useCallback(() => {
-    void audio.current?.play().catch((reason: Error) => {
+    const el = audio.current
+    if (!el) return
+    // Resume Web Audio during the same user gesture as media playback.
+    prepareMeter(el)
+    const continuing = !el.paused
+    void el.play().then(() => {
+      if (continuing && !el.paused && el === audio.current) onStart()
+    }).catch((reason: Error) => {
       if (reason.name !== "AbortError") setError("Playback could not start.")
     })
-  }, [])
+  }, [onStart, prepareMeter])
 
   const seek = useCallback((seconds: number, startPlaying = false) => {
     const el = audio.current
@@ -112,7 +145,7 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
     else el.pause()
   }
 
-  return { audio, time, playing, advancing, duration, ready, error, seek, toggle }
+  return { audio, wave, time, playing, advancing, duration, ready, error, seek, toggle }
 }
 
 export function AudioPlayer({ player }: { player: ReturnType<typeof usePlayback> }) {

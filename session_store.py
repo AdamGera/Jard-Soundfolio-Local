@@ -205,28 +205,6 @@ class SessionStore:
                 "audioName": row["name"] + Path(row["filename"]).suffix if options["recording"] else row["name"],
                 "audioPath": f"audio/{key}/{row['filename']}", "audioUrl": f"/api/sessions/{key}/audio"}
 
-    def page(self, key, offset, limit, query):
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("""SELECT id,name,filename,created,duration,processed,status,error,options
-                                FROM sessions WHERE id=?""", (key,)).fetchone()
-            if row is None:
-                raise MissingSession(key)
-            # Apply the filter after calculating original positions, so search hits
-            # retain their true playback offsets. Only page-sized payloads reach Python.
-            db.create_function("fold", 1, str.casefold, deterministic=True)
-            condition = " AND instr(fold(json_extract(payload,'$.text')),?)" if query else ""
-            params = (key, query.casefold()) if query else (key,)
-            total = db.execute("SELECT count(*) FROM chunks WHERE session_id=?" + condition, params).fetchone()[0]
-            rows = db.execute("""SELECT * FROM (
-                    SELECT row_number() OVER (ORDER BY seconds)-1 AS idx,
-                           lag(seconds,1,0) OVER (ORDER BY seconds) AS start,seconds,payload
-                    FROM chunks WHERE session_id=?
-                ) WHERE 1=1""" + condition + " ORDER BY seconds LIMIT ? OFFSET ?", (*params, limit, offset))
-            chunks = [{**json.loads(c["payload"]), "index": c["idx"], "start": c["start"], "end": c["seconds"]} for c in rows]
-            return {**self._metadata(db, row), "interruption": row["error"], "offset": offset,
-                    "nextOffset": offset + limit if offset + limit < total else None, "totalChunks": total, "chunks": chunks}
-
     def media(self, key):
         with self.connection() as db:
             row = db.execute("SELECT filename,mime FROM sessions WHERE id=?", (key,)).fetchone()

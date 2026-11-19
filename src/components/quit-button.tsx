@@ -1,9 +1,11 @@
 import { useState } from "react"
 import { AlertDialog } from "radix-ui"
 import { Power } from "lucide-react"
+import { desktopBridge } from "@/desktop"
 import { Button } from "./ui/button"
 
 export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: () => void }) {
+  const native = desktopBridge()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
@@ -11,6 +13,7 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
     setBusy(true)
     setError("")
     try {
+      if (native) await native.request("stop")
       const response = await fetch("/api/quit", { method: "POST", headers: { "X-Jard-Action": "quit" } })
       if (response.status === 405 || response.status === 404) {
         // An already-running older server can serve the new UI before its next restart.
@@ -36,19 +39,20 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
 
   return <AlertDialog.Root onOpenChange={() => setError("")}>
     <AlertDialog.Trigger asChild>
-      <Button size="icon-sm" variant="ghost" title="Quit Jard Soundfolio Local" aria-label="Quit Jard Soundfolio Local"><Power /></Button>
+      <Button size="icon-sm" variant="ghost" title="Quit Jard Soundfolio Local Everywhere" aria-label="Quit Jard Soundfolio Local Everywhere"><Power /></Button>
     </AlertDialog.Trigger>
     <AlertDialog.Portal>
       <AlertDialog.Overlay className="note-language-scrim" />
       <AlertDialog.Content className="note-language-confirm" onEscapeKeyDown={event => { if (busy) event.preventDefault() }}>
-        <AlertDialog.Title>Are you sure?</AlertDialog.Title>
+        <AlertDialog.Title>Quit Jard Soundfolio Local Everywhere?</AlertDialog.Title>
         <AlertDialog.Description>
-          {recording ? "Quitting will discard the current recording." : "Quit Jard Soundfolio Local and stop local processing? Your saved sessions will be here next time."}
+          {recording && (native ? "The Mac app will save your recording first. " : "Quitting will discard this browser recording. ")}
+          This stops the shared engine and active jobs for all clients. To leave other clients working, close this {native ? "window" : "tab"}.
         </AlertDialog.Description>
         {error && <p role="alert">{error}</p>}
         <div className="note-language-actions">
           <AlertDialog.Cancel asChild><Button size="sm" variant="outline" disabled={busy}>Cancel</Button></AlertDialog.Cancel>
-          <Button size="sm" disabled={busy} onClick={() => void quit()}>{busy ? "Quitting…" : "Okay"}</Button>
+          <Button size="sm" disabled={busy} onClick={() => void quit()}>{busy ? "Quitting…" : "Quit Everywhere"}</Button>
         </div>
       </AlertDialog.Content>
     </AlertDialog.Portal>

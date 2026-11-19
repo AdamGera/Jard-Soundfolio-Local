@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 HOST = "127.0.0.1"
@@ -108,3 +108,34 @@ class ClientLeases:
             self.last_activity = now
             return False
         return now - self.last_activity >= 30
+
+def quit_engine():
+    if not running_engine():
+        print("Jard Soundfolio Local is already stopped.")
+        return
+    request = Request(URL + "/api/quit", method="POST", headers={"Origin": URL, "X-Jard-Action": "quit"})
+    with urlopen(request, timeout=3) as response:
+        if response.status != 202:
+            raise RuntimeError("Jard Soundfolio Local could not quit.")
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((HOST, PORT), timeout=0.2):
+                pass
+        except OSError:
+            print("Jard Soundfolio Local has quit.")
+            return
+        time.sleep(0.15)
+    raise RuntimeError("Jard Soundfolio Local is still finishing its shutdown.")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--quit", required=True, action="store_true")
+    parser.parse_args()
+    try:
+        quit_engine()
+    except (OSError, RuntimeError) as error:
+        parser.exit(1, str(error) + "\n")

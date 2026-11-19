@@ -87,6 +87,17 @@ class NoteStorageTests(unittest.TestCase):
         self.store.finish(key)
         return key
 
+    def test_different_speaker_activity_does_not_reuse_a_peer_overview(self):
+        self.complete("ar", "First recording")
+        source = self.store.root / "different-speakers.wav"
+        source.write_bytes(b"audio")
+        key, _ = self.store.create(source, source.name, "audio/wav", {"recording": False, "diarization": True}, 25)
+        for begin, end, lang in [(0, 2, "English"), (2, 25, "Arabic")]:
+            self.store.append(key, dict(text="Speech", language=lang, words=[], segments=[],
+                                        activity=[{"speaker": 1, "start": begin, "end": end}]), end)
+        self.store.finish(key)
+        self.assertEqual(self.store.get(key)["overview"]["status"], "queued")
+
     def test_exact_peer_reuses_artifacts_but_changed_anchors_miss(self):
         with writing_cache.scope(self.store, self.key):
             writing_cache.remember("summary-stage", {"result": "decision"})

@@ -1,8 +1,8 @@
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from local_qwen import LocalQwen
+from local_qwen import BASE_CONTEXT, MAX_CONTEXT, LocalQwen
 
 
 TITLE = {"type": "object", "properties": {"title": {"type": "string"}}}
@@ -63,3 +63,42 @@ class StructuredProgressTests(unittest.IsolatedAsyncioTestCase):
                 await model.structured("Title", {}, TITLE, on_partial=snapshots.append)
             self.assertEqual(snapshots[-1], {})
             save.assert_not_called()
+
+class FullContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generated_editorial_prompt_is_the_actual_user_message(self):
+        model = object.__new__(LocalQwen)
+        model.fit_prompt = AsyncMock()
+        prompt = "Explain the disagreement first, then what resolved it."
+        transcript = "First passage. Middle passage. Closing passage."
+
+        async def generate(messages, **kwargs):
+            self.assertEqual(messages[-1], {"role": "user", "content": prompt})
+            self.assertIn(transcript, messages[1]["content"])
+            self.assertIn("Editorial policy", messages[0]["content"])
+            yield '{"title":"Resolution"}'
+
+        model.generate = generate
+        with patch("writing_cache.recall", return_value=None), patch("writing_cache.remember"):
+            await model.structured(prompt, transcript, TITLE, policy="Editorial policy", full_context=True)
+        model.fit_prompt.assert_awaited_once()
+
+    async def test_sizes_the_templated_request_and_rejects_over_limit_without_truncation(self):
+        model = object.__new__(LocalQwen)
+        model.context_size = BASE_CONTEXT
+        messages = [{"role": "user", "content": "all passages and the complete guide"}]
+        response = Mock()
+        response.json.return_value = {"prompt": "rendered with chat template"}
+        model.http = AsyncMock()
+        model.http.post.return_value = response
+        model.tokens = AsyncMock(return_value=BASE_CONTEXT - 100)
+        model.stop_process = AsyncMock()
+        model.ready = AsyncMock()
+
+        await model.fit_prompt(messages, 1000)
+        self.assertEqual(model.context_size, BASE_CONTEXT * 2)
+        self.assertEqual(model.http.post.call_args.kwargs["json"]["messages"], messages)
+        model.tokens.assert_awaited_with("rendered with chat template")
+        model.tokens.return_value = MAX_CONTEXT
+        with self.assertRaisesRegex(RuntimeError, "full transcript"):
+            await model.fit_prompt(messages, 1000)
+        model.ready.assert_awaited_once()

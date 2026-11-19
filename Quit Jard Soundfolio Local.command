@@ -2,7 +2,18 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 
-# The running server holds this file open for the lifetime of its session library.
+if [[ -t 0 ]]; then
+  read -r -p "Quit Jard Soundfolio Local Everywhere? This stops active jobs for the Mac app and all browser tabs. [y/N] " answer
+  case "$answer" in y|Y|yes|YES) ;; *) exit 0 ;; esac
+fi
+
+# A current engine may have been launched by the installed Mac app in a different folder.
+if [[ -x .venv/bin/python ]] && .venv/bin/python engine_lifecycle.py --quit; then
+  exit 0
+fi
+
+# Older source builds have no shared control protocol. Only stop the process
+# that owns this checkout's local library and is actually running this server.
 library="${RUMBLE_DATA_DIR:-$HOME/Library/Application Support/Rumble}"
 lock="$library/.server.lock"
 if [[ -f "$lock" ]]; then
@@ -25,4 +36,5 @@ if [[ -f "$lock" ]]; then
     exit 0
   done
 fi
-echo "Jard Soundfolio Local is already stopped."
+echo "Could not find a matching Jard Soundfolio Local engine. Close its original launcher and try again."
+exit 1

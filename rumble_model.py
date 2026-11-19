@@ -1,10 +1,11 @@
 import logging
+import os
 import shutil
 from pathlib import Path
 
 MODEL_ID = "Reson8/Rumble-2-Flash"
 REVISION = "92ec9141fb1178c5e77fd0020fe86a33c355060b"
-MODEL_DIR = Path(__file__).resolve().parent / "model"
+MODEL_DIR = Path(os.environ.get("JARD_MODEL_DIR", Path(__file__).resolve().parent / "model"))
 SAMPLE_RATE = 16_000
 MAX_SAMPLES = 25 * SAMPLE_RATE
 DIARIZATION_ID = "nvidia/Nemotron-3-Diarization"

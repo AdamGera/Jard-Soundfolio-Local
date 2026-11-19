@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname -- "$0")/engine-env.sh"
+exec "$jard_python" -EsBu "$JARD_ENGINE_ROOT/desktop/mac_bridge.py" "$@"

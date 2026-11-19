@@ -1,10 +1,11 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from insights import Insights, ObsoleteGeneration, note_identity, anchored_topics, markdown_summary, obj, STRING, validate_translation, validate_language, ground_quantities
-from local_qwen import LocalQwen
+from insights import excerpts, Insights, ObsoleteGeneration, note_identity, anchored_topics, markdown_summary, obj, STRING, validate_translation, validate_language, ground_quantities
+from local_qwen import LocalQwen, source_messages
 from title_words import word_ends, compact_title
 from session_notes import passages
 from session_store import SessionStore
@@ -30,30 +31,69 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
             self.rows = passages(db, self.key)
             self.expected = note_identity(db, self.key)
 
-    async def test_retry_after_title_uses_saved_brief_and_title(self):
+    async def test_writer_receives_complete_transcript_and_guide_then_reuses_both_on_retry(self):
+        rows = [{"id": i, "start": i, "text": f"Passage {i} with a different detail."} for i in range(1, 801)]
+        transcript = excerpts(rows)
+        guide = {"anchor1": 1, "anchor2": 200, "anchor3": 350, "anchor4": 500, "anchor5": 650, "anchor6": 800, "writerPrompt": "Lead with the revised launch date, then explain the distinct risks."}
+        summary = {"anchor1": "Initial topic.", "anchor2": "", "anchor3": "", "anchor4": "", "anchor5": "", "anchor6": "One risk is unresolved."}
+        with self.store.connection() as db:
+            activity = [{"speaker": 1, "seconds": 3, "share": .75}, {"speaker": 2, "seconds": 1, "share": .25}]
+            db.execute("UPDATE sessions SET transcript=json_set(transcript,'$.speakerActivity',json(?)) WHERE id=?",
+                       (json.dumps(activity), self.key))
         model = self.insights.model
-        brief = {"understanding": "Launch review", "writing_brief": "Explain the decision to move the launch."}
-        title = {"title": "Launch moved to Friday"}
-        summary = {"lead": "The launch is Friday.", "sections": [{"heading": "Date", "points": ["Friday."]}]}
-        timeline = {"topics": [{"id": 1, "label": "Launch", "detail": "They agreed to launch on Friday."}]}
-        model.structured.side_effect = [brief, title, RuntimeError("temporary error")]
-        with self.assertRaises(RuntimeError):
-            await self.insights.write(self.key, self.rows, "source evidence", "English", self.expected)
-        self.assertEqual(model.structured.call_args_list[2].kwargs["context"], brief)
+        model.structured.side_effect = [guide, summary, RuntimeError("title failed")]
+        with self.assertRaisesRegex(RuntimeError, "title failed"):
+            await self.insights.write(self.key, rows, "English", self.expected)
+        planner, writer, title_call = model.structured.call_args_list
+        self.assertEqual(planner.args[1], transcript)
+        self.assertEqual(writer.args[1], transcript)
+        self.assertEqual(planner.kwargs["context"]["speakerAnalytics"], {
+            "speakerCount": 2, "speakers": [{"label": "Speaker A", "seconds": 3, "sharePercent": 75},
+                                           {"label": "Speaker B", "seconds": 1, "sharePercent": 25}]})
+        self.assertIn("[P800]", writer.kwargs["context"]["topicEvidence"]["anchor6"])
+        self.assertEqual(len(planner.kwargs["context"]["passageOptions"]), 6)
+        self.assertIn(guide["writerPrompt"], writer.args[0])
+        self.assertEqual(planner.kwargs["policy"], writer.kwargs["policy"])
+        self.assertTrue(planner.kwargs["full_context"] and writer.kwargs["full_context"])
+        self.assertIn("transcript is the authority", writer.kwargs["policy"])
+        self.assertEqual(title_call.args[1]["summary"], summary["anchor1"])
         model.structured.reset_mock()
-        model.structured.side_effect = [summary, timeline]
-        result = await self.insights.write(self.key, self.rows, "source evidence", "English", self.expected)
-        self.assertEqual(model.structured.call_count, 2)
-        self.assertEqual(result["markdown"], "## Date\n\n- Friday.")
-        self.assertEqual(result["topics"][0]["detail"], "They agreed to launch on Friday.")
-        self.assertEqual(result["title"], title["title"])
+        model.structured.side_effect = [{"title": "Friday launch"}]
+        self.insights.timeline = AsyncMock(return_value=[{"id": 1, "start": 0, "label": "Launch", "detail": "Friday."}])
+        result = await self.insights.write(self.key, rows, "English", self.expected)
+        self.assertEqual(model.structured.call_count, 1)
+        self.assertEqual(result["markdown"], "- One risk is unresolved.")
+
+    async def test_short_suggestion_keeps_qualifier_in_writer_context_and_uses_only_a_lead(self):
+        rows = [{"id": 1, "start": 0, "text": "Speaker A: Maybe Wednesday, if the venue is free."},
+                {"id": 2, "start": 2, "text": "Speaker B: Let's check first."}]
+        self.insights.model.structured.side_effect = [
+            {"anchor1": 1, "writerPrompt": "Explain the options."},
+            {"lead": "Wednesday was suggested, pending venue availability."}]
+        result = await self.insights.write_overview(self.key, rows, "English", self.expected)
+        planner = self.insights.model.structured.call_args_list[0]
+        self.assertIsNone(planner.kwargs["context"]["speakerAnalytics"])
+        writer = self.insights.model.structured.call_args_list[1]
+        self.assertIn(rows[0]["text"], writer.kwargs["context"]["topicEvidence"]["anchor1"])
+        self.assertIn(rows[1]["text"], writer.args[1])
+        self.assertEqual(list(writer.args[2]["properties"]), ["lead"])
+        self.assertEqual(result["markdown"], "")
+        self.assertEqual(self.insights.model.structured.await_count, 2)
+
+    async def test_echoed_question_keeps_actual_acceptance_in_short_exchange(self):
+        rows = [{"id": 1, "start": 0, "text": "Speaker A: Should we book Wednesday?"},
+                {"id": 2, "start": 2, "text": "Speaker B: Yes, let's book it."}]
+        self.insights.model.structured.side_effect = [
+            {"anchor1": 1, "writerPrompt": "Explain the outcome."}, {"lead": "Should we book Wednesday?"}]
+        result = await self.insights.write_overview(self.key, rows, "English", self.expected)
+        self.assertEqual(result["summary"], "Should we book Wednesday? Yes, let's book it.")
 
     async def test_localization_keeps_exact_anchor_and_order(self):
         original = {"title": "Friday", "summary": "The launch is Friday.", "markdown": "## Date\n\n- Friday.",
                     "topics": [{"id": 1, "start": 2.125, "label": "Launch", "detail": "Friday."}]}
         self.insights.model.structured.side_effect = [
-            {"translatedTitle": "جمعه", "translatedLead": "جمعه", "translatedMarkdown": "## جمعه"}, {"chapter1": {"label": "روز", "detail": "جمعه"}}]
-        translated = await self.insights.localize(original, "Persian", self.rows)
+            {"translatedTitle": "جمعه"}, {"chapter1": {"label": "روز", "detail": "جمعه"}}]
+        translated = await self.insights.localize_metadata(original, "Persian")
         self.assertEqual([(t["id"], t["start"]) for t in translated["topics"]], [(1, 2.125)])
         self.assertEqual(translated["topics"][0]["detail"], "جمعه")
 
@@ -75,6 +115,12 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
             await self.insights.checkpoint(self.key, -2, generate, self.expected)
         with self.store.connection() as db:
             self.assertIsNone(db.execute("SELECT data FROM window_notes WHERE id=?", (self.key,)).fetchone())
+
+    def test_full_context_preserves_real_passage_boundaries(self):
+        source = excerpts([{"id": 1, "start": 0, "text": "Wednesday?"},
+                           {"id": 2, "start": 1, "text": "Only if the venue confirms."}])
+        self.assertEqual(source_messages(source, plain_transcript=True)[1]["content"].splitlines()[1:],
+                         source.splitlines())
 
     def test_chapters_validate_ids_and_preserve_chronology(self):
         rows = [{"id": 1, "start": 1.5}, {"id": 2, "start": 3.0}]
@@ -127,13 +173,37 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chapters[1]["start"], 10776)
         self.assertIn("Friday", chapters[1]["detail"])
 
-    async def test_short_note_preserves_the_exact_decision_and_deduplicates_support(self):
-        rows = [{"id": 1, "text": "Speaker A: Wednesday was proposed."},
-                {"id": 2, "text": "Speaker B: We will open at 12:30 on Friday."}]
-        self.insights.model.structured.return_value = {"mainPassage": 2, "heading": "Planning", "supportingPassages": [1, 1, 2]}
-        note = await self.insights.short_summary(rows, "source", "English", {}, "en")
-        self.assertEqual(note["lead"], "We will open at 12:30 on Friday.")
-        self.assertEqual(note["sections"][0]["points"], ["Wednesday was proposed."])
+    async def test_timeline_uses_full_transcript_when_it_fits_even_with_many_passages(self):
+        rows = [{"id": i, "start": i, "text": f"Detail {i}."} for i in range(1, 90)]
+        source = await self.insights.timeline_source(self.key, rows, self.expected)
+        for row in rows:
+            self.assertIn(row["text"], source)
+        self.insights.model.structured.assert_not_called()
+
+    async def test_timeline_prefers_original_window_evidence_over_paraphrases(self):
+        rows = [{"id": i, "start": i, "text": f"Original passage {i}."} for i in range(1, 401)]
+        notes = [{"first": i, "last": i + 99, "topics": [{"id": i + 40}], "summary": "An inference"}
+                 for i in range(1, 401, 100)]
+        self.insights.outline = AsyncMock(return_value=([], notes))
+        self.insights.model.tokens.side_effect = len
+        source = await self.insights.timeline_source(self.key, rows, self.expected)
+        self.assertNotIn("coverageNotes", source)
+        for note in notes:
+            for anchor in (note["first"], note["last"], note["topics"][0]["id"]):
+                self.assertIn(f"Original passage {anchor}.", source["transcriptExcerpts"])
+
+    async def test_long_timeline_combines_window_coverage_with_original_passages(self):
+        from insights import TIMELINE_SOURCE_TOKENS
+        rows = [{"id": i, "start": i, "text": f"Passage {i}. " + "source " * 60} for i in range(1, 91)]
+        notes = [{"first": i, "last": i + 9, "topics": [{"id": i + 4}], "summary": f"Window {i}"}
+                 for i in range(1, 91, 10)]
+        self.insights.outline = AsyncMock(return_value=([], notes))
+        self.insights.model.tokens.side_effect = len
+        source = await self.insights.timeline_source(self.key, rows, self.expected)
+        self.assertEqual(source["coverageNotes"], notes)
+        for row in (rows[0], rows[-1]):
+            self.assertIn(row["text"], source["transcriptExcerpts"])
+        self.assertLessEqual(len(source_messages(source)[1]["content"]), TIMELINE_SOURCE_TOKENS)
 
     def test_native_language_and_source_quantities(self):
         with self.assertRaises(ValueError):
@@ -222,13 +292,33 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["summary"], value["lead"])
         self.assertEqual(result["markdown"], "## الخرائط\n\n- وصلت الخرائط.\n- رُوجعت التفاصيل.")
 
+    def test_generated_asr_stutter_is_collapsed_without_changing_numbers(self):
+        value = {"lead": "ناقشوا نقل نقل نقل التكنولوجيا.", "markdown": "- الرقم 22 مختلف عن 2."}
+        self.assertEqual(markdown_summary(value), {"summary": "ناقشوا نقل التكنولوجيا.", "markdown": value["markdown"]})
+
     def test_repeated_sentence_filter_keeps_different_quantities(self):
         value = {"lead": "Bids received.", "markdown": "- The bid was 1.5 million.\n- The bid was 15 million."}
         self.assertEqual(markdown_summary(value)["markdown"], value["markdown"])
 
-    async def test_localization_does_not_request_filler_for_a_single_fact(self):
-        original = {"language": "en", "title": "Opening", "summary": "The library opens on Friday.", "markdown": "", "topics": []}
-        self.insights.model.structured.return_value = {"translatedTitle": "Apertura", "translatedLead": "La biblioteca abre el viernes."}
-        translated = await self.insights.localize(original, "Spanish", self.rows)
-        self.assertEqual(translated["markdown"], "")
-        self.assertNotIn("translatedMarkdown", self.insights.model.structured.call_args.args[2]["properties"])
+    async def test_selected_language_writes_from_full_transcript_and_persists_separately(self):
+        from session_notes import publish, selection
+
+        original = {"language": "en", "title": "Opening", "summary": "An old one-line overview.",
+                    "markdown": "", "topics": []}
+        generated = {"summary": "Se habló de la fecha de apertura.",
+                     "markdown": "- La conversación mencionó el viernes."}
+        with self.store.connection() as db:
+            publish(db, self.key, "en", original)
+            selection(db, self.key, "es", regenerate=True)
+            expected = (*note_identity(db, self.key), "es", 1)
+        self.insights.write_overview = AsyncMock(return_value=generated)
+        self.insights.model.structured.return_value = {"translatedTitle": "Apertura"}
+        await self.insights.overview(self.key, "es", "en", expected)
+        self.insights.write_overview.assert_awaited_once_with(
+            self.key, self.rows, "Spanish", expected, checkpoint_stages=False)
+        self.assertEqual(self.insights.model.structured.await_count, 1)
+        self.assertEqual(self.insights.model.structured.call_args.args[1], original["title"])
+        with self.store.connection() as db:
+            target = selection(db, self.key)["version"]
+            self.assertEqual(target, {**generated, "language": "es", "title": "Apertura", "topics": []})
+            self.assertEqual(selection(db, self.key, "en")["version"], original)

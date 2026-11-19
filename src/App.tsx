@@ -1,6 +1,8 @@
 import { useEffect, useEffectEvent, useRef, useState, type ChangeEvent } from "react"
-import { FolderOpen, Mic, Plus, Square, UsersRound } from "lucide-react"
+import { ChevronDown, FolderOpen, Mic, Plus, Square, UsersRound } from "lucide-react"
 
+import { captureSources, desktopBridge, recordingPermissions, RECORDING_MODES, savedRecordingMode, type CaptureSource, type DesktopCaptureEvent, type RecordingDraft, type RecordingMode, type RecordingPermissions } from "./desktop"
+import { RecordingAccessDialog } from "@/components/recording-permissions"
 import { readSessionRoute, writeSessionRoute } from "./session-route"
 import { clock, speakerLabel } from "./speaker-activity"
 import { QuitButton } from "@/components/quit-button"
@@ -46,7 +48,7 @@ function message(error: unknown) {
 export default function App() {
   const [quitting, setQuitting] = useState(false)
   return quitting
-    ? <main className="quit-screen" role="status"><h1>Jard Soundfolio Local is shutting down.</h1><p>You can close this tab.</p></main>
+    ? <main className="quit-screen" role="status"><h1>Jard Soundfolio Local is shutting down.</h1><p>{desktopBridge() ? "You can close this window." : "You can close this tab."}</p></main>
     : <Workspace onQuit={() => setQuitting(true)} />
 }
 
@@ -66,6 +68,21 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const [processed, setProcessed] = useState<ProcessingAudio | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const [level, setLevel] = useState(0)
+  const native = desktopBridge()
+  const [permissionGuide, setPermissionGuide] = useState<RecordingPermissions | null>(null)
+  const [inspectingAccess, setInspectingAccess] = useState(false)
+  const [refusedSource, setRefusedSource] = useState<CaptureSource | null>(null)
+  const [mode, setMode] = useState<RecordingMode>(savedRecordingMode)
+  const [microphoneName, setMicrophoneName] = useState("Mac default microphone")
+  const [systemLevel, setSystemLevel] = useState(0)
+  const [choosingFile, setChoosingFile] = useState(false)
+  const [recoveredAudio, setRecoveredAudio] = useState<RecordingDraft[]>([])
+  const [discarding, setDiscarding] = useState<string | null>(null)
+  const nativeCapture = useRef(false)
+  const nativeStopping = useRef(false)
+  const nativeSession = useRef<AbortController | null>(null)
+  const deviceRevision = useRef(0)
+  const liveRevision = useRef(0)
   const [copied, setCopied] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const [current, setCurrent] = useState<DownloadItem | null>(null)
@@ -74,6 +91,27 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const pendingNavigation = useRef(false)
   const session = useRef<Session | null>(null)
   const copyTimer = useRef<number>(undefined)
+
+  useEffect(() => {
+    const endpoint = `/api/clients/${crypto.randomUUID()}`
+    let connection: EventSource | undefined
+    const connect = () => {
+      connection?.close()
+      connection = new EventSource(endpoint + "/stream")
+    }
+    const disconnect = () => {
+      connection?.close()
+      void fetch(endpoint, { method: "DELETE", keepalive: true }).catch(() => {})
+    }
+    connect()
+    window.addEventListener("pageshow", connect)
+    window.addEventListener("pagehide", disconnect)
+    return () => {
+      window.removeEventListener("pageshow", connect)
+      window.removeEventListener("pagehide", disconnect)
+      disconnect()
+    }
+  }, [])
 
   useEffect(() => {
     const abort = new AbortController()
@@ -112,7 +150,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
 
   const recording = phase === "recording"
   const busy = phase === "starting" || phase === "transcribing"
-  const canStart = status === "ready" && phase === "idle" && !restoring
+  const canStart = status === "ready" && phase === "idle" && !restoring && !choosingFile
   const preparingModel = status === "loading"
   const processingSavedAudio = phase === "idle" && current?.saved?.status === "processing"
   const working = busy || restoring || preparingModel || processingSavedAudio
@@ -141,6 +179,116 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     const tab = showSession(saved, reopening ? "overview" : "transcript")
     writeSessionRoute(saved.id, tab)
   }
+
+  async function openAcceptedSession(id: string) {
+    nativeCapture.current = false
+    nativeStopping.current = false
+    nativeSession.current?.abort()
+    const controller = new AbortController()
+    nativeSession.current = controller
+    setLevel(0)
+    setSystemLevel(0)
+    if (!pendingNavigation.current) writeSessionRoute(id, "transcript")
+    try {
+      const saved = await readSession(id, controller.signal)
+      if (!controller.signal.aborted && !pendingNavigation.current) openSaved(saved, false)
+    } catch (error) {
+      if (!controller.signal.aborted) setFeedback(message(error))
+    } finally {
+      if (!controller.signal.aborted) setPhase("idle")
+    }
+  }
+
+  const receiveCapture = useEffectEvent((event: DesktopCaptureEvent) => {
+    deviceRevision.current++
+    switch (event.event) {
+      case "started":
+        nativeCapture.current = true
+        nativeStopping.current = false
+        setMode(event.mode)
+        setMicrophoneName(event.microphone)
+        if (!pendingNavigation.current) writeSessionRoute(null)
+        clearSession()
+        setPreviewPaused(false)
+        setElapsed(0)
+        setLevel(0)
+        setSystemLevel(0)
+        setPhase("recording")
+        break
+      case "levels":
+        if (!nativeCapture.current || nativeStopping.current) return
+        setElapsed(Math.floor(event.seconds))
+        setLevel(Math.max(0, Math.min(1, event.mic)))
+        setSystemLevel(Math.max(0, Math.min(1, event.system)))
+        if (event.microphone) setMicrophoneName(event.microphone)
+        break
+      case "sourceChanged":
+        if (event.microphone) setMicrophoneName(event.microphone)
+        setFeedback(event.message)
+        break
+      case "preview":
+        if (nativeCapture.current && live && !nativeStopping.current) {
+          setResult({ ...EMPTY_TRANSCRIPT, text: event.text, segments: event.segments ?? [] })
+        }
+        break
+      case "finished":
+        nativeStopping.current = true
+        setPhase("transcribing")
+        if (event.reason && event.reason !== "Stopped") setFeedback(event.reason)
+        break
+      case "accepted":
+        void openAcceptedSession(event.id)
+        break
+      case "warning":
+        setFeedback(event.message)
+        break
+      case "error":
+        nativeCapture.current = false
+        nativeStopping.current = false
+        setPhase("idle")
+        if (event.permission) {
+          setInspectingAccess(false)
+          setRefusedSource(event.permission)
+          setPermissionGuide({ [event.permission]: "denied" })
+          setFeedback("")
+        } else setFeedback(event.message)
+        break
+    }
+  })
+
+  useEffect(() => {
+    if (!native) return
+    let disposed = false
+    const receive = (e: WindowEventMap["jard-capture"]) => receiveCapture(e.detail)
+    const sync = async () => {
+      const revision = deviceRevision.current
+      try {
+        const devices = await native.request("devices")
+        if (disposed || deviceRevision.current !== revision) return
+        if (devices.microphone) setMicrophoneName(devices.microphone)
+        setRecoveredAudio(devices.drafts ?? [])
+        if (devices.capture && !nativeStopping.current) {
+          nativeCapture.current = true
+          setMode(devices.capture.mode)
+          setLive(devices.capture.live)
+          setElapsed(Math.floor(devices.capture.seconds ?? 0))
+          if (devices.capture.text) setResult({ ...EMPTY_TRANSCRIPT, text: devices.capture.text, segments: devices.capture.segments ?? [] })
+          setPhase("recording")
+        }
+      } catch (error) {
+        if (!disposed && deviceRevision.current === revision) setFeedback(message(error))
+      }
+    }
+    window.addEventListener("jard-capture", receive)
+    window.addEventListener("focus", sync)
+    void sync()
+    return () => {
+      disposed = true
+      window.removeEventListener("jard-capture", receive)
+      window.removeEventListener("focus", sync)
+      nativeSession.current?.abort()
+    }
+  }, [native])
 
   const restore = useEffectEvent(async () => {
     restoreRequest.current?.abort()
@@ -186,6 +334,25 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   useEffect(() => {
     if (phase === "idle" && pendingNavigation.current) void restore()
   }, [phase])
+
+  const selectedId = current?.saved?.id
+  useEffect(() => {
+    if (!selectedId || phase !== "idle") return
+    const controller = new AbortController()
+    async function checkSelection() {
+      try {
+        const response = await fetch("/api/sessions", { signal: controller.signal, cache: "no-store" })
+        if (!response.ok) return
+        const rows: Pick<SavedSession, "id">[] = await response.json()
+        if (!controller.signal.aborted && !rows.some(row => row.id === selectedId) && readSessionRoute().id === selectedId) {
+          clearSession("Session no longer exists.")
+          writeSessionRoute(null, "overview", true)
+        }
+      } catch { /* Existing content stays available across a transient disconnect. */ }
+    }
+    window.addEventListener("focus", checkSelection)
+    return () => { controller.abort(); window.removeEventListener("focus", checkSelection) }
+  }, [selectedId, phase])
 
   // A refresh can rejoin an offline transcription after its audio has been accepted.
   // Poll the small session index and fetch the full transcript once it is ready.
@@ -242,6 +409,30 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     const withSpeakers = diarization && speakerLabelsAvailable
     const id = withSpeakers ? crypto.randomUUID() : undefined
     try {
+      if (native) {
+        setInspectingAccess(false)
+        const statuses = await recordingPermissions(native, mode)
+        const sources = captureSources(mode)
+        if (sources.some(source => statuses[source] !== "granted")) {
+          setPermissionGuide({ ...statuses })
+          for (const source of sources) {
+            if (statuses[source] !== "unavailable") continue
+            const permission = await native.request("permission", { source, prompt: true })
+            statuses[source] = permission.status
+            setPermissionGuide({ ...statuses })
+          }
+          if (sources.some(source => statuses[source] !== "granted")) {
+            setPhase("idle")
+            return
+          }
+        }
+        setPermissionGuide(null)
+        setRefusedSource(null)
+        nativeCapture.current = true
+        nativeStopping.current = false
+        await native.request("record", { mode, live, diarization: withSpeakers, languages })
+        return
+      }
       const preview = live ? livePreview(languages, id, setResult, () => setPreviewPaused(true)) : undefined
       const microphone = await openMicrophone((mic, samples) => {
         const seconds = mic.length / mic.sampleRate
@@ -264,12 +455,19 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       setResult(EMPTY_TRANSCRIPT)
       setPhase("recording")
     } catch (error) {
+      nativeCapture.current = false
       setFeedback(message(error))
       setPhase("idle")
     }
   }
 
   function toggleLive() {
+    if (native && nativeCapture.current) {
+      const revision = ++liveRevision.current
+      void native.request("live", { enabled: !live }).catch(error => {
+        if (revision === liveRevision.current) { setLive(live); setFeedback(message(error)) }
+      })
+    }
     const active = session.current
     if (active && live) active.preview?.stop()
     if (active && !live) {
@@ -281,6 +479,21 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   }
 
   async function stopRecording() {
+    if (native) {
+      if (!nativeCapture.current || nativeStopping.current) return
+      nativeStopping.current = true
+      setTab("transcript")
+      setProcessed(null)
+      setPhase("transcribing")
+      try {
+        await native.request("stop")
+      } catch (error) {
+        nativeStopping.current = false
+        setPhase(nativeCapture.current ? "recording" : "idle")
+        setFeedback(message(error))
+      }
+      return
+    }
     const active = session.current
     if (!active) return
     session.current = null
@@ -304,6 +517,62 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     } finally {
       setPhase("idle")
     }
+  }
+
+  async function chooseAudio() {
+    if (!native) { fileInput.current?.click(); return }
+    if (!canStart) return
+    setChoosingFile(true)
+    setFeedback("")
+    try {
+      const selected = await native.request("openAudio", {
+        diarization: diarization && speakerLabelsAvailable,
+        languages: selectedLanguages.map(language => language.code),
+      })
+      if (selected?.id) await openAcceptedSession(selected.id)
+    } catch (error) {
+      setFeedback(message(error))
+    } finally {
+      setChoosingFile(false)
+    }
+  }
+
+  async function handleRecovery(id: string, discard: boolean) {
+    if (!native || !canStart) return
+    setChoosingFile(true)
+    setFeedback("")
+    try {
+      if (discard) await native.request("discard", { id })
+      else {
+        const saved = await native.request("recover", {
+          id, diarization: diarization && speakerLabelsAvailable, languages: selectedLanguages.map(l => l.code),
+        })
+        await openAcceptedSession(saved.id)
+      }
+      setRecoveredAudio(drafts => drafts.filter(d => d.id !== id))
+      setDiscarding(null)
+    } catch (error) {
+      setFeedback(message(error))
+    } finally {
+      setChoosingFile(false)
+    }
+  }
+
+  function changeMode(value: RecordingMode) {
+    setPermissionGuide(null)
+    setRefusedSource(null)
+    setMode(value)
+    try { localStorage.setItem("jard.recordingMode", value) } catch { /* Use this choice for this window. */ }
+  }
+
+  async function showRecordingAccess() {
+    if (!native) return
+    try {
+      const statuses = await recordingPermissions(native, mode)
+      setRefusedSource(null)
+      setInspectingAccess(true)
+      setPermissionGuide(statuses)
+    } catch (error) { setFeedback(message(error)) }
   }
 
   async function openFile(event: ChangeEvent<HTMLInputElement>) {
@@ -374,6 +643,14 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   }
 
   return (
+    <SessionLibrary busy={phase !== "idle" || restoring} currentId={current?.id}
+      onHome={newSession} onSelect={openSaved} onDelete={id => {
+        if (current?.id !== id && readSessionRoute().id !== id) return
+        restoreRequest.current?.abort()
+        setRestoring(false)
+        clearSession()
+        writeSessionRoute(null, "overview", true)
+      }}>
     <div className="soundfolio-shell" data-session={viewingSession}>
       <header className="soundfolio-header">
         <div className="wordmark">
@@ -381,21 +658,12 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
             <source media="(prefers-color-scheme: dark)" srcSet="/jard-dark.png" />
             <img className="wordmark-icon" src="/jard-light.png" width="40" height="40" alt="" />
           </picture>
-          Jard Soundfolio Local
+          <span className="wordmark-text">Jard Soundfolio Local</span>
         </div>
         <nav className="workspace-actions" aria-label="Session actions">
-          {viewingSession && <>
-            <Downloads item={current} compact />
-            <Button size="sm" variant="ghost" onClick={newSession} title="New session" aria-label="New session"><Plus /><span>New session</span></Button>
-          </>}
-        <SessionLibrary busy={phase !== "idle" || restoring} currentId={current?.id} onSelect={openSaved} onDelete={id => {
-          if (current?.id !== id && readSessionRoute().id !== id) return
-          restoreRequest.current?.abort()
-          setRestoring(false)
-          clearSession()
-          writeSessionRoute(null, "overview", true)
-        }} />
-        <QuitButton recording={recording || phase === "starting"} onQuit={onQuit} />
+          {viewingSession && <Downloads item={current} compact />}
+          <Button size="sm" variant="ghost" disabled={phase !== "idle" || restoring} onClick={newSession} title="New session" aria-label="New session"><Plus /><span>New session</span></Button>
+          <QuitButton recording={recording || phase === "starting"} onQuit={onQuit} />
         </nav>
       </header>
 
@@ -421,7 +689,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
               variant="ghost"
               className="dock-button"
               disabled={!canStart}
-              onClick={() => fileInput.current?.click()}
+              onClick={() => void chooseAudio()}
             >
               <FolderOpen />
               Open audio
@@ -442,7 +710,12 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
           <div className="activity" role="status">
             {recording && (
               <span className="capture-status">
-                <meter min={0} max={1} value={level} aria-label="Microphone level" />
+                {(!native || mode !== "system") && <span className="capture-meter">
+                  {native && <span>Mic</span>}<meter min={0} max={1} value={level} aria-label="Microphone level" />
+                </span>}
+                {native && mode !== "mic" && <span className="capture-meter">
+                  <span>Mac audio</span><meter min={0} max={1} value={systemLevel} aria-label="Mac audio level" />
+                </span>}
                 <span className="timer" aria-hidden="true">{clock(elapsed)}</span>
               </span>
             )}
@@ -474,9 +747,41 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
               Speakers
             </Button>
           </div>
+          {native && <div className="native-audio-source">
+            <label className="native-source-picker">
+              <Mic aria-hidden="true" />
+              <select aria-label="Recording source" value={mode} disabled={phase !== "idle" || choosingFile}
+                onChange={event => changeMode(event.target.value as RecordingMode)}>
+                {Object.entries(RECORDING_MODES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            {mode !== "system" && <span className="native-input-name" title="Current input from macOS Sound settings">
+              {microphoneName}
+            </span>}
+            <button className="native-permission-link" type="button" disabled={phase !== "idle" || choosingFile}
+              onClick={() => void showRecordingAccess()}>Recording access</button>
+          </div>}
+          {!!recoveredAudio.length && <section className="native-recovery" aria-label="Interrupted recordings">
+            {recoveredAudio.map(d => <div className="native-recovery-row" key={d.id}>
+              {discarding === d.id ? <>
+                <span>Permanently discard this {clock(d.seconds)} recording?</span>
+                <Button size="sm" variant="ghost" disabled={choosingFile} onClick={() => setDiscarding(null)}>Cancel</Button>
+                <Button size="sm" variant="destructive" disabled={!canStart} onClick={() => void handleRecovery(d.id, true)}>Discard recording</Button>
+              </> : <>
+                <span>Interrupted recording · {clock(d.seconds)}</span>
+                <Button size="sm" variant="outline" disabled={!canStart} onClick={() => void handleRecovery(d.id, false)}>Recover</Button>
+                <Button size="sm" variant="ghost" disabled={!canStart} onClick={() => setDiscarding(d.id)}>Discard…</Button>
+              </>}
+            </div>)}
+          </section>}
         </div>
         <Downloads item={current} /></>}
       </main>
     </div>
+    {native && permissionGuide && <RecordingAccessDialog native={native} mode={mode} permissions={permissionGuide} inspection={inspectingAccess}
+      refusedSource={refusedSource} starting={phase === "starting"} onChange={setPermissionGuide}
+      onClose={() => { setPermissionGuide(null); setRefusedSource(null) }} onRetry={() => void startRecording()} />}
+    </SessionLibrary>
   )
 }

@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname -- "$0")/engine-env.sh"
+case "${1:-}" in
+    model-status|models) exec "$jard_python" -EsBu "$jard_model_setup" "$@" ;;
+    start) cd "$JARD_ENGINE_ROOT"; exec "$jard_python" -EsBu server.py --background --no-open ;;
+    *) echo "Usage: jard-engine start | model-status | models [--from MODEL_FOLDER]" >&2; exit 2 ;;
+esac

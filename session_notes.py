@@ -71,6 +71,20 @@ def reuse_ready(db, key, target):
     return True
 
 
+def speaker_context(db, key):
+    """Use the same measured activity and denominator as the player's analytics tab."""
+    row = db.execute("SELECT json_extract(transcript, '$.speakerActivity') FROM sessions WHERE id=?", (key,)).fetchone()
+    if not row or row[0] is None:
+        return None
+    activity = json.loads(row[0])
+    speakers = [
+        {"label": f"Speaker {chr(64 + item['speaker'])}", "seconds": round(item["seconds"], 2),
+         "sharePercent": round(100 * item["share"], 1)}
+        for item in activity
+    ]
+    return {"speakerCount": len(speakers), "speakers": speakers}
+
+
 def initialize(db, key, *, refinalize=False):
     from insights import PIPELINE_REVISION
 
@@ -101,7 +115,7 @@ def initialize(db, key, *, refinalize=False):
             weights[code] += end - start
         start = end
     base = weights.most_common(1)[0][0] if weights else "und"
-    digest = memo_key("transcript-passages-v1", [base, passages(db, key)])
+    digest = memo_key("transcript-and-speakers-v2", [base, passages(db, key), speaker_context(db, key)])
     if prior and prior["source_digest"] == digest and (saved or prior["revision"] == PIPELINE_REVISION):
         return
     pref = prior["preference"] if prior else "auto"
