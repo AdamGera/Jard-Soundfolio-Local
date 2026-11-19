@@ -24,7 +24,7 @@ Use **File → Open in Browser** to open the same workspace alongside the Mac wi
 
 #### Updating the Mac app
 
-If you have v0.1.0, install the current DMG once. Your recordings and downloaded models are stored separately from the application. Starting with v0.1.1, choose **Jard Soundfolio Local → Check for Updates…** to check GitHub. The app also checks when it opens. Turn off **Check for Updates on Launch** in the same menu for manual checks only. These requests send no recordings, transcripts, or notes.
+The current release is **v0.0.4**. If your copy shows a higher version number, install this DMG once to switch to the corrected version sequence. Your recordings and downloaded models are stored separately from the application. In v0.0.4, choose **Jard Soundfolio Local → Check for Updates…** to check GitHub. The app also checks when it opens. Turn off **Check for Updates on Launch** in the same menu for manual checks only. These requests send no recordings, transcripts, or notes.
 
 When a newer version is available, finish any recording and choose **Install Update**, or choose **Later**. The app verifies Jard’s release signature and the downloaded archive before replacing itself and reopening. Install it in a writable Applications folder first.
 
@@ -40,7 +40,7 @@ Open **Settings** in the Mac sidebar to check microphone and Mac audio permissio
 
 ### Browser application
 
-For the source installation, use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [Jard Soundfolio Local source ZIP](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.1.0/Jard-Soundfolio-Local.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
+For the source installation, use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [Jard Soundfolio Local source ZIP](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-native-source.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
 
 The browser interface connects to the engine on your Mac at `http://127.0.0.1:8765`. You can also use the welcome page.
 
