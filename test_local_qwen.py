@@ -1,4 +1,7 @@
 import asyncio
+import json
+
+import httpx
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -50,6 +53,27 @@ class StructuredProgressTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await model.structured("Title", {}, TITLE, on_partial=snapshots.append), result)
             self.assertEqual(snapshots, [result])
             save.assert_not_called()
+
+    async def test_structured_stream_requires_normal_stop_even_for_parseable_json(self):
+        for first_stop in ("length", None):
+            with self.subTest(first_stop=first_stop):
+                budgets = []
+                def respond(request):
+                    budgets.append(json.loads(request.content)["max_tokens"])
+                    first = len(budgets) == 1
+                    item = {"delta": {"content": json.dumps({"title": "Cut short" if first else "Full result"})},
+                            "finish_reason": first_stop if first else "stop"}
+                    sse = "data: " + json.dumps({"choices": [item]}) + "\n\ndata: [DONE]\n\n"
+                    return httpx.Response(200, text=sse)
+                async with httpx.AsyncClient(base_url="http://localhost", transport=httpx.MockTransport(respond)) as http:
+                    model = object.__new__(LocalQwen)
+                    model.http = http
+                    with patch("writing_cache.recall", return_value=None), patch("writing_cache.remember") as save:
+                        result = await model.structured("Title", {}, TITLE, limit=3000)
+                self.assertEqual(result, {"title": "Full result"})
+                self.assertEqual(budgets, [3000, 4024])
+                save.assert_called_once()
+                self.assertEqual(save.call_args.args[1], result)
 
     async def test_terminal_error_clears_draft_without_caching(self):
         async def generate(*args, **kwargs):

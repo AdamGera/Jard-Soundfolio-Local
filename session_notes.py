@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE TABLE IF NOT EXISTS overviews (
  id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE, lang TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'queued', title TEXT, body TEXT, error TEXT,
- generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(id,lang)
+ generation INTEGER NOT NULL DEFAULT 0, scope TEXT, PRIMARY KEY(id,lang)
 );
 CREATE TABLE IF NOT EXISTS window_notes (
  id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE, part INTEGER NOT NULL, data TEXT NOT NULL,
@@ -152,6 +152,37 @@ def initialize(db, key, *, refinalize=False):
             reuse_ready(db, key, pref)
 
 
+class RegenerationConflict(ValueError):
+    pass
+
+
+def queue_regeneration(db, key, target, note, scope):
+    from insights import CHAPTERS, GUIDE, PIPELINE_REVISION, SUMMARY
+
+    job = db.execute("SELECT status,scope,body IS NOT NULL AS saved,generation FROM overviews WHERE id=? AND lang=?",
+                     (key, target)).fetchone()
+    if scope and not job["saved"]:
+        raise RegenerationConflict("Wait for the first version to finish before regenerating this tab.")
+    if job["status"] == "queued":
+        if job["scope"] != scope:
+            raise RegenerationConflict("A writing task is already running for this language.")
+        if job["generation"]:
+            return
+    db.execute("""UPDATE overviews SET generation=generation+1,status='queued',scope=?,error=NULL
+                  WHERE id=? AND lang=?""", (scope, key, target))
+    if target != note["base"]:
+        return
+    if note["revision"] != PIPELINE_REVISION:
+        db.execute("DELETE FROM window_notes WHERE id=?", (key,))
+        db.execute("UPDATE notes SET revision=? WHERE id=?", (PIPELINE_REVISION, key))
+    elif scope == "overview":
+        db.execute("DELETE FROM window_notes WHERE id=? AND part IN (?,?)", (key, GUIDE, SUMMARY))
+    elif scope == "timeline":
+        db.execute("DELETE FROM window_notes WHERE id=? AND part=?", (key, CHAPTERS))
+    else:
+        db.execute("DELETE FROM window_notes WHERE id=? AND part<0", (key,))
+
+
 def selection(db, key, lang=None, retry=False, *, regenerate=False):
     initialize(db, key)
     row = db.execute("SELECT * FROM notes WHERE id=?", (key,)).fetchone()
@@ -163,17 +194,7 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         if db.execute("SELECT 1 FROM overviews WHERE id=?", (key,)).fetchone():
             db.execute("INSERT OR IGNORE INTO overviews(id,lang) VALUES(?,?)", (key, target))
             if regenerate:
-                # Repeated clicks on an already queued explicit run coalesce, even across process restarts.
-                cursor = db.execute(
-                    """UPDATE overviews SET generation=generation+1,status='queued',error=NULL
-                       WHERE id=? AND lang=? AND (generation=0 OR status!='queued')""", (key, target))
-                if cursor.rowcount and target == row["base"]:
-                    from insights import PIPELINE_REVISION
-                    if row["revision"] != PIPELINE_REVISION:
-                        db.execute("DELETE FROM window_notes WHERE id=?", (key,))
-                        db.execute("UPDATE notes SET revision=? WHERE id=?", (PIPELINE_REVISION, key))
-                    else:
-                        db.execute("DELETE FROM window_notes WHERE id=? AND part<0", (key,))
+                queue_regeneration(db, key, target, row, regenerate if isinstance(regenerate, str) else None)
             db.execute(
                 "UPDATE overviews SET status='queued' WHERE id=? AND lang=? AND status='stale'",
                 (key, target),
@@ -184,12 +205,13 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
                 """UPDATE overviews SET status='blocked',
                        error=(SELECT error FROM overviews WHERE id=? AND lang=?)
                        WHERE id=? AND lang=? AND status='queued' AND EXISTS(
-                       SELECT 1 FROM overviews WHERE id=? AND lang=? AND status='error')""",
+                       SELECT 1 FROM overviews WHERE id=? AND lang=? AND status='error' AND body IS NULL)""",
                 (key, row["base"], key, target, key, row["base"]),
             )
             if retry or regenerate:
                 db.execute(
-                    "UPDATE overviews SET status='queued',error=NULL WHERE id=? AND status='error' AND lang IN (?,?)",
+                    """UPDATE overviews SET status='queued',error=NULL WHERE id=? AND status='error'
+                       AND (lang=? OR (lang=? AND body IS NULL))""",
                     (key, target, row["base"]),
                 )
                 db.execute(
@@ -203,7 +225,7 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         )
     row = db.execute("SELECT * FROM notes WHERE id=?", (key,)).fetchone()
     target = row["base"] if row["preference"] == "auto" else row["preference"]
-    item = db.execute("SELECT status,error FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+    item = db.execute("SELECT status,error,scope FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
     display = db.execute(
         "SELECT body FROM overviews WHERE id=? AND lang=?", (key, row["displayed"])
     ).fetchone()
@@ -213,6 +235,7 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
         "target": target,
         "status": item["status"] if item else "empty",
         "error": item["error"] if item else None,
+        "scope": item["scope"] if item else None,
         "version": json.loads(display[0]) if display else None,
     }
 
@@ -220,24 +243,36 @@ def selection(db, key, lang=None, retry=False, *, regenerate=False):
 def publish(db, key, target, version):
     if not db.execute("SELECT 1 FROM notes WHERE id=?", (key,)).fetchone():
         return
-    progress = db.execute("SELECT generation FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+    progress = db.execute("SELECT generation,scope,body FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
     generation = progress[0] if progress else 0
+    scope = progress["scope"] if progress else None
+    if scope:
+        saved = json.loads(progress["body"])
+        fields = ("summary", "markdown") if scope == "overview" else ("topics",)
+        # Only the requested tab owns these fields. Keep even unknown legacy metadata.
+        for field in fields:
+            if field in version:
+                saved[field] = version[field]
+            else:
+                saved.pop(field, None)
+        version = saved
     actual = version["language"]
     if target == "und" and actual != target:
         db.execute("UPDATE notes SET base=? WHERE id=? AND base='und'", (actual, key))
         db.execute("DELETE FROM overviews WHERE id=? AND lang='und'", (key,))
     db.execute(
         """INSERT INTO overviews(id,lang,status,title,body,generation) VALUES(?,?,'ready',?,?,?)
-         ON CONFLICT(id,lang) DO UPDATE SET status='ready',title=excluded.title,body=excluded.body,generation=excluded.generation,error=NULL""",
+         ON CONFLICT(id,lang) DO UPDATE SET status='ready',title=excluded.title,body=excluded.body,generation=excluded.generation,scope=NULL,error=NULL""",
         (key, actual, version["title"], json.dumps(version, ensure_ascii=False), generation),
     )
     note = db.execute("SELECT base,preference FROM notes WHERE id=?", (key,)).fetchone()
-    if generation and actual == note["base"]:
+    if generation and not scope and actual == note["base"]:
         # Mark translations stale only after successful publication. Keep old bodies readable on failure.
-        db.execute("""UPDATE overviews SET generation=generation+1,error=NULL,
+        db.execute("""UPDATE overviews SET generation=generation+1,error=NULL,scope=NULL,
                      status=CASE WHEN lang=? OR status IN ('queued','blocked') THEN 'queued' ELSE 'stale' END
                      WHERE id=? AND lang!=?""", (note["preference"], key, actual))
-    db.execute("UPDATE overviews SET status='queued',error=NULL WHERE id=? AND status='blocked'", (key,))
+    if actual == note["base"]:
+        db.execute("UPDATE overviews SET status='queued',error=NULL WHERE id=? AND status='blocked'", (key,))
     db.execute(
         """UPDATE notes SET displayed=? WHERE id=? AND
                (displayed IS NULL OR preference=? OR (preference='auto' AND base=?))""",

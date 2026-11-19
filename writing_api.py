@@ -5,13 +5,14 @@ import json
 import logging
 import re
 import time
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from session_notes import LANGUAGES, initialize, selection
+from session_notes import LANGUAGES, RegenerationConflict, initialize, selection
 import chat_context
 import writing_cache
 from session_store import MissingSession
@@ -23,7 +24,7 @@ logger = logging.getLogger("uvicorn.error")
 class OverviewChoice(BaseModel):
     language: str = Field(max_length=32)
     retry: bool = False
-    regenerate: bool = False
+    regenerate: bool | Literal["overview", "timeline"] = False
 
 
 class ChatQuestion(BaseModel):
@@ -53,8 +54,11 @@ def overview_response(request, key, choice=None):
     with request.app.state.library.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         session_status(db, key)
-        value = selection(db, key, choice.language if choice else None, choice.retry if choice else False,
-                          regenerate=bool(choice and choice.regenerate))
+        try:
+            value = selection(db, key, choice.language if choice else None, choice.retry if choice else False,
+                              regenerate=choice.regenerate if choice else False)
+        except RegenerationConflict as error:
+            raise HTTPException(409, str(error)) from error
     if value is None:
         raise HTTPException(409, "The overview is available after transcription finishes.")
     if value["status"] == "queued":

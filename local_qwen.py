@@ -201,9 +201,10 @@ class LocalQwen:
             raise RuntimeError(f"The local engine could not open a context for the full {required:,}-token "
                                "request. Free memory and retry the overview.") from error
 
-    async def generate(self, messages, *, schema=None, limit=600):
-        body = {**REQUEST, "messages": messages, "max_tokens": limit, "stream": True}
+    async def generate(self, messages, *, schema=None, limit=600, sampling=None):
+        body = {**REQUEST, **(sampling or {}), "messages": messages, "max_tokens": limit, "stream": True}
         self.last_timings = {}
+        finish_reason = None
         if schema:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": schema}}
         async with self.http.stream("POST", "/v1/chat/completions", json=body) as response:
@@ -212,23 +213,28 @@ class LocalQwen:
                 if line.startswith("data: ") and line[6:] != "[DONE]":
                     event = json.loads(line[6:])
                     if "timings" in event:
-                        self.last_timings = {k: event["timings"][k] for k in ("cache_n", "prompt_n", "prompt_ms")
+                        self.last_timings = {k: event["timings"][k] for k in ("cache_n", "prompt_n", "prompt_ms", "predicted_n")
                                              if k in event["timings"]}
                     if not event.get("choices"):
                         continue
                     item = event["choices"][0]
+                    finish_reason = item.get("finish_reason") or finish_reason
                     if piece := item["delta"].get("content"):
                         yield piece
+        if schema and finish_reason != "stop":
+            if finish_reason == "length":
+                raise ValueError("The response reached the output token limit. Finish the required fields concisely.")
+            raise ValueError("The local stream ended before the model signaled completion.")
 
-    async def structured(self, instruction, data, schema, limit=900, *, context=None, policy="", full_context=False, validate=None, on_partial=None):
+    async def structured(self, instruction, data, schema, limit=900, *, context=None, policy="", full_context=False, validate=None, on_partial=None, sampling=None):
         task = instruction if full_context else instruction + " Return the requested JSON."
         if context is not None:
             extra = "Additional editorial context:\n" + json.dumps(context, ensure_ascii=False, sort_keys=True)
             task = extra + "\n\n" + task if full_context else task + "\n" + extra
         messages = [*source_messages(data, policy, plain_transcript=full_context), {"role": "user", "content": task}]
-        budgets = (limit, min(limit + 550, 2300))
+        budgets = (limit, limit + min(limit, 1024))
         # Each stage has its own identity: a downstream writing-prompt change leaves upstream calls reusable.
-        key = writing_cache.memo_key("structured-v1", [MODEL_SHA, BIN_SHA, RUNTIME, REQUEST, messages, schema, budgets])
+        key = writing_cache.memo_key("structured-v2", [MODEL_SHA, BIN_SHA, RUNTIME, REQUEST, sampling, messages, schema, budgets])
         def check(value):
             check_structure(value, schema)
             if validate:
@@ -250,28 +256,29 @@ class LocalQwen:
             output = ""
             next_preview = 0.0
             previous = None
-            async for piece in self.generate(messages, schema=schema, limit=budget):
-                output += piece
-                if on_partial is None or time.monotonic() < next_preview:
-                    continue
-                try:
-                    partial = from_json(output, allow_partial="trailing-strings")
-                except ValueError:
-                    continue
-                if isinstance(partial, dict) and partial and partial != previous:
-                    on_partial(partial)
-                    previous = partial
-                    next_preview = time.monotonic() + 0.06
             try:
+                async for piece in self.generate(messages, schema=schema, limit=budget, **({"sampling": sampling} if sampling else {})):
+                    output += piece
+                    if on_partial is None or time.monotonic() < next_preview:
+                        continue
+                    try:
+                        partial = from_json(output, allow_partial="trailing-strings")
+                    except ValueError:
+                        continue
+                    if isinstance(partial, dict) and partial and partial != previous:
+                        on_partial(partial)
+                        previous = partial
+                        next_preview = time.monotonic() + 0.06
                 value = json.loads(output)
                 check(value)
-            except ValueError as error:
+            except (ValueError, httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as error:
                 if on_partial is not None:
                     on_partial({})
                 if attempt:
                     raise ValueError("The local model returned an incomplete or invalid result.") from error
-                messages[-1] = {"role": "user", "content": task + "\nCorrection for this attempt: " +
-                                (str(error) if not isinstance(error, json.JSONDecodeError) else "Finish the JSON object.")}
+                correction = (str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError)
+                              else "Return the complete JSON object.")
+                messages[-1] = {"role": "user", "content": task + "\nCorrection for this attempt: " + correction}
                 continue
             writing_cache.remember(key, value)
             if on_partial is not None:

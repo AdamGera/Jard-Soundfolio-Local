@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <signal.h>
 #import <errno.h>
 #import <unistd.h>
@@ -157,14 +158,18 @@
 - (void)checkPermission:(NSString *)source prompt:(BOOL)prompt reply:(void (^)(NSString *))reply {
     if ([source isEqual:@"system"]) {
         if (CGPreflightScreenCaptureAccess()) { reply(@"granted"); return; }
-        // CoreGraphics' preflight does not distinguish a first request from a
-        // denial. Remember asking so a normal retry won't replay the same prompt.
-        if (!prompt) {
-            reply([NSUserDefaults.standardUserDefaults boolForKey:@"JardRequestedSystemCapture"] ? @"denied" : @"unavailable");
-            return;
-        }
-        [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"JardRequestedSystemCapture"];
-        reply(CGRequestScreenCaptureAccess() ? @"granted" : @"denied");
+        // A negative CoreGraphics preflight is inconclusive. On explicit request,
+        // ask the same ScreenCaptureKit API that the recorder uses. Discard the
+        // content list immediately; this check never creates a recording stream.
+        if (!prompt) { reply(@"unavailable"); return; }
+        [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:NO
+            completionHandler:^(SCShareableContent *content, NSError *error) {
+                NSString *status = nil;
+                if (content && !error) status = @"granted";
+                else if ([error.domain isEqual:SCStreamErrorDomain] && error.code == SCStreamErrorUserDeclined)
+                    status = @"denied";
+                dispatch_async(dispatch_get_main_queue(), ^{ reply(status); });
+            }];
         return;
     }
     switch ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]) {
@@ -200,7 +205,8 @@
         }
         if ([command isEqual:@"jard.permission"]) {
             [self checkPermission:source prompt:[payload[@"prompt"] isEqual:@YES] reply:^(NSString *status) {
-                [self respond:@{@"id": request, @"ok": @YES, @"result": @{@"status": status}}];
+                if (status) [self respond:@{@"id": request, @"ok": @YES, @"result": @{@"status": status}}];
+                else [self reject:request reason:@"Mac audio access could not be checked. Try again."];
             }];
         } else {
             NSString *pane = [source isEqual:@"mic"] ? @"Privacy_Microphone" : @"Privacy_ScreenCapture";

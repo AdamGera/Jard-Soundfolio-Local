@@ -15,7 +15,9 @@ class DraftTests(unittest.IsolatedAsyncioTestCase):
                 patch(summary="ملخص")
                 self.assertTrue(previous.is_set())
                 with previews.watch("session", "ar") as reconnected:
-                    self.assertEqual(reconnected.draft, {"language": "ar", "summary": "ملخص"})
+                    self.assertEqual(reconnected.draft, {"language": "ar", "stage": "analysis", "summary": "ملخص"})
+                patch(stage="timeline")
+                self.assertEqual(subscriber.draft, {"language": "ar", "stage": "timeline", "summary": "ملخص"})
                 with previews.watch("session", "en") as other:
                     self.assertIsNone(other.draft)
                 with previews.watch("other", "ar") as other:

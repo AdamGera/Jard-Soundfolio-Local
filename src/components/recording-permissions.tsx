@@ -35,7 +35,7 @@ export function RecordingAccessDialog({ native, mode, permissions, refusedSource
         onChange(result)
         setMessage(sources.every(s => result[s] === "granted") ?
           (refusedSource ? "System Settings reports access is enabled. Quit and reopen Jard if macOS still refuses capture." : "Access is ready.") :
-          "macOS still needs permission for the sources marked above.")
+          (result.system === "unavailable" ? "Choose Verify Mac audio access to check with macOS." : "Check the macOS settings for the sources marked above."))
       }
     } catch { if (active.current) setMessage("Could not check access. Try again.") }
     finally { changing.current = false; if (active.current) setPending(false) }
@@ -81,7 +81,7 @@ export function RecordingAccessDialog({ native, mode, permissions, refusedSource
         <Dialog.Title>{inspection ? "Recording access" : "Allow recording on this Mac"}</Dialog.Title>
         <Dialog.Description>{refusedSource ?
           "macOS refused " + (refusedSource === "system" ? "Mac audio capture" : "microphone capture") + ". Check Jard Soundfolio Local in Privacy & Security, then retry." :
-          (inspection ? "Check macOS access for your selected audio sources." : "Jard Soundfolio Local needs permission for the audio sources you selected.")}</Dialog.Description>
+          (inspection ? "Check macOS access for your selected audio sources." : "Check access for the audio sources you selected.")}</Dialog.Description>
         {(refusedSource || sources.some(source => permissions[source] === "denied")) &&
           <p>If Jard is already on in System Settings, quit Jard with ⌘Q, reopen it from Applications, then retry.</p>}
         <div className="recording-access-sources">{sources.map(source => {
@@ -91,11 +91,11 @@ export function RecordingAccessDialog({ native, mode, permissions, refusedSource
             <Icon aria-hidden="true" /><div><strong>{names[source]}</strong>
               <small>{source === "mic" ? "Your voice from the selected input" : "Sound from calls and other apps"}</small></div>
             {status === "granted" && refusedSource !== source ? <span className="recording-access-allowed"><Check aria-hidden="true" />Allowed</span> :
-              <div className="recording-access-action"><small>{refusedSource === source ? "Capture refused" : statuses[status]}</small>
+              <div className="recording-access-action"><small>{refusedSource === source ? "Capture refused" : source === "system" && status === "unavailable" ? "Unconfirmed" : statuses[status]}</small>
                 {(refusedSource === source || status === "denied" || status === "restricted") ?
                   <Button variant="outline" size="sm" disabled={busy} aria-label={"Open " + panes[source] + " settings"}
                     onClick={() => void native.request("openPrivacy", { source }).catch(() => setMessage("Open System Settings → Privacy & Security → " + panes[source] + "."))}>Open Settings</Button> :
-                  <Button variant="outline" size="sm" disabled={busy} onClick={() => void request(source)}>Request access</Button>}
+                  <Button variant="outline" size="sm" disabled={busy} onClick={() => void request(source)}>{source === "system" ? "Verify Mac audio access" : "Request access"}</Button>}
               </div>}
           </div>
         })}</div>

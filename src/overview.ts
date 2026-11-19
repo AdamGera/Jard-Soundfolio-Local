@@ -3,8 +3,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 export type Topic = { id: number; start: number; label: string; detail?: string }
 export type OverviewVersion = { language: string; title: string; summary: string; markdown?: string; topics: Topic[] }
 export type DraftTopic = { id?: number; start?: number; label: string; detail?: string }
-type Draft = { language: string; title?: string; summary?: string; markdown?: string; topics: DraftTopic[] }
+const stageLabels = {
+  analysis: "Analyzing transcript…",
+  writing: "Writing overview…",
+  title: "Writing title…",
+  timeline: "Writing topic timeline…",
+}
+
+type Draft = { language: string; stage?: keyof typeof stageLabels; title?: string; summary?: string; markdown?: string; topics: DraftTopic[] }
+export type WritingTab = "overview" | "timeline"
 export type Overview = {
+  scope?: WritingTab | null
   preference: string; autoLanguage: string; target: string
   status: "empty" | "queued" | "ready" | "error" | "blocked"
   version: OverviewVersion | null; error: string | null
@@ -34,7 +43,9 @@ function parseDraft(data: string, target: string): Draft | null {
       return [{ label, detail: field(topic?.detail), id: typeof topic?.id === "number" ? topic.id : undefined,
         start: typeof topic?.start === "number" && Number.isFinite(topic.start) && topic.start >= 0 ? topic.start : undefined }]
     }) : []
-    return { language: value.language, title: field(value.title), summary: field(value.summary), markdown: field(value.markdown), topics }
+    const stage = typeof value.stage === "string" && Object.hasOwn(stageLabels, value.stage)
+      ? value.stage as keyof typeof stageLabels : undefined
+    return { language: value.language, stage, title: field(value.title), summary: field(value.summary), markdown: field(value.markdown), topics }
   } catch { return null }
 }
 
@@ -43,7 +54,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
   const [preview, setPreview] = useState<{ target: string; draft: Draft } | null>(null)
   const [error, setError] = useState("")
   const [requesting, setRequesting] = useState(false)
-  const requestedLanguage = useRef<string | undefined>(undefined)
+  const [failedChoice, setFailedChoice] = useState<{ language: string; retry: boolean; regenerate: WritingTab | false } | null>(null)
   const revision = useRef(0)
   const posts = useRef(Promise.resolve())
   const url = `/api/sessions/${id}/overview`
@@ -92,6 +103,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
         const data: Overview = await r.json()
         if (request.signal.aborted || !current()) return
         setValue(data)
+        setFailedChoice(null)
         setError("")
         if (data.status !== "queued") { setPreview(null); return }
         if (target === data.target) connect(data.target)
@@ -114,9 +126,9 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
     }
   }, [id, url, requesting, status, target, visible])
 
-  const select = useCallback((language: string, retry = false, regenerate = false) => {
+  const select = useCallback((language: string, retry = false, regenerate: WritingTab | false = false) => {
     setPreview(null)
-    requestedLanguage.current = language
+    setFailedChoice(null)
     const serial = ++revision.current
     setRequesting(true)
     setError("")
@@ -125,19 +137,26 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       try {
         const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ language, retry, regenerate }) })
-        if (!r.ok) throw Error()
+        if (!r.ok) {
+          if (r.status === 409) throw new Error((await r.json()).detail)
+          throw new Error("Could not update the " + (regenerate || "overview") + ". Try again.")
+        }
         const data: Overview = await r.json()
         if (serial === revision.current) setValue(data)
-      } catch {
-        if (serial === revision.current) setError("Could not update the overview. Try again.")
+      } catch (reason) {
+        if (serial === revision.current) {
+          setFailedChoice({ language, retry, regenerate })
+          setError(reason instanceof Error ? reason.message : "Could not reach the local writer.")
+        }
       } finally {
         if (serial === revision.current) setRequesting(false)
       }
     })
   }, [url])
-  const retry = () => select(requestedLanguage.current ?? value?.preference ?? "auto", true)
+  const retry = () => failedChoice ? select(failedChoice.language, failedChoice.retry, failedChoice.regenerate)
+    : select(value?.preference ?? "auto", true)
   const version = useMemo(() => displayVersion(value?.version), [value?.version])
-  const regenerate = () => select(value?.preference ?? "auto", false, true)
+  const regenerate = (tab: WritingTab) => select(value?.preference ?? "auto", false, tab)
   const draft = visible && status === "queued" && !requesting && preview?.target === target ? preview?.draft : null
-  return { draft, value, version, error, select, retry, regenerate, requesting }
+  return { draft, errorTab: failedChoice?.regenerate || null, stageLabel: draft?.stage && stageLabels[draft.stage], value, version, error, select, retry, regenerate, requesting }
 }

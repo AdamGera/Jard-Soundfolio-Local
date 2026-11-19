@@ -5,7 +5,9 @@ import hashlib
 import logging
 import re
 import unicodedata
-from contextlib import asynccontextmanager
+import math
+from collections import Counter, defaultdict
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from inspect import getsource
 
@@ -67,6 +69,50 @@ IDENTIFY = (
 
 def excerpts(rows):
     return "\n".join(f"[P{r['id']}] ({r['start']:.1f}s) {r['text']}" for r in rows)
+
+
+def overview_index(rows):
+    """Two substantive passages per minute, supplementing the complete source in both calls."""
+    tokens = [re.findall(r"[^\W\d_]+", re.sub(r"^Speaker [A-Z]: ", "", r["text"]).casefold()) for r in rows]
+    terms = list(map(set, tokens))
+    frequency = Counter(word for passage in terms for word in passage)
+    mostly_ascii = sum(n for word, n in frequency.items() if word.isascii()) > sum(frequency.values()) / 2
+    weight = {w: min(4, math.log1p(len(rows) / (1 + n))) for w, n in frequency.items()}
+    minutes = defaultdict(list)
+    for i, row in enumerate(rows):
+        minutes[int(row["start"] // 60)].append(i)
+
+    def score(i):
+        words = terms[i]
+        neighbors = set().union(*terms[max(0, i - 2):i], *terms[i + 1:i + 3])
+        shared = sum(weight[w] for w in sorted(words & neighbors) if len(w) > 2)
+        mixed = sum(w.isascii() != mostly_ascii and len(w) >= 2 for w in words)
+        relevance = sum(weight[w] for w in sorted(words)) + .7 * shared + 9 * min(6, mixed) ** 1.3
+        diversity = min(1, len(words) / max(1, len(tokens[i])) + .1)
+        return relevance * diversity / max(8, len(tokens[i])) ** .4
+
+    return [rows[i] for group in minutes.values() for i in sorted(sorted(group, key=score, reverse=True)[:2])]
+
+
+# High-confidence affirmative constructions for these source languages. This is
+# a conservative check for an explicit commitment, never a decision classifier.
+DECISION_CLAIM = re.compile(
+    r"\b(?:they|both parties|the participants|the speakers|the team|we) (?:formally |finally )?"
+    r"(?:agreed to|decided to|approved|signed|confirmed the)\b|"
+    r"(?<!لم )(?<!لن )(?<!لا )(?<!أن )(?<!عدم )(?:تم الاتفاق على|اتفق الطرفان على|قرر الطرفان أن)|"
+    r"(?:הצדדים הסכימו ל|הוחלט סופית|הצוות החליט ל)", re.IGNORECASE)
+ACCEPTANCE = re.compile(
+    r"\b(?:we agreed|approved|confirmed|let.s (?:do|book|sign)|we.ve decided|yes,? (?:let.s|we will))\b|"
+    r"(?:اتفقنا|موافق|مؤكد|تم الاتفاق|قررنا)|(?:סיכמנו|אישרנו|החלטנו|מאושר)", re.IGNORECASE)
+
+
+def evidence_phrase(row):
+    text = re.sub(r"^Speaker [A-Z]:\s*", "", row["text"]).strip()
+    # A legacy row can contain a whole audio block. Bound only the quotation in
+    # the response grammar; both model calls still receive the complete passage.
+    if len(text) <= 240:
+        return text
+    return text[:240].rsplit(" ", 1)[0] or text[:240]
 
 
 def clean(value):
@@ -257,6 +303,10 @@ class Insights:
         self.wake = asyncio.Event()
         self.wake.set()
         self.chat_count = 0
+        self.chats_done = asyncio.Event()
+        self.chats_done.set()
+        self.writer_active = False
+        self.overview_lease = None
         self.active_job = None
         self.worker = asyncio.create_task(self.run())
 
@@ -267,11 +317,11 @@ class Insights:
                                   WHERE v.status='queued' AND n.revision IS NOT ?""", (PIPELINE_REVISION,)).fetchall()
             for item in outdated:
                 session_notes.initialize(db, item[0])
-            row = db.execute("""SELECT v.id,v.lang,n.base,n.source_digest,n.revision,v.generation FROM overviews v JOIN notes n ON n.id=v.id
+            row = db.execute("""SELECT v.id,v.lang,n.base,n.source_digest,n.revision,v.generation,v.scope FROM overviews v JOIN notes n ON n.id=v.id
                 WHERE v.status='queued' AND (v.lang=n.base OR EXISTS(SELECT 1 FROM overviews b
-                WHERE b.id=v.id AND b.lang=n.base AND b.status='ready'))
+                WHERE b.id=v.id AND b.lang=n.base AND (b.status='ready' OR (v.scope IS NOT NULL AND b.body IS NOT NULL))))
                 ORDER BY (v.lang=n.base) DESC,v.rowid LIMIT 1""").fetchone()
-            return (row[0], row[1], row[2], (row[3], row[4], row[1], row[5])) if row else None
+            return (row[0], row[1], row[2], (row[3], row[4], row[1], row[5]), row[6]) if row else None
 
     async def preview_job(self, job):
         with self.previews.track(job[0], job[1]):
@@ -303,15 +353,18 @@ class Insights:
                         db.execute("UPDATE overviews SET status='error', error=? WHERE id=? AND lang=?",
                                    (reason, *job[:2]))
                         if job[1] == job[2]:
-                            db.execute("UPDATE overviews SET status='blocked',error=? WHERE id=? AND status='queued'",
-                                       (reason, job[0]))
+                            db.execute("""UPDATE overviews SET status='blocked',error=? WHERE id=? AND status='queued'
+                                AND (scope IS NULL OR NOT EXISTS (SELECT 1 FROM overviews b
+                                    WHERE b.id=? AND b.lang=? AND b.body IS NOT NULL))""",
+                                (reason, job[0], job[0], job[2]))
                 finally:
                     self.active_job = None
 
     @asynccontextmanager
     async def chat_priority(self):
         self.chat_count += 1
-        if self.active_job:
+        self.chats_done.clear()
+        if self.active_job and not self.writer_active:
             self.active_job.cancel()
         try:
             async with self.model.lock:
@@ -319,7 +372,22 @@ class Insights:
                 yield
         finally:
             self.chat_count -= 1
+            if not self.chat_count:
+                self.chats_done.set()
             self.wake.set()
+
+    @asynccontextmanager
+    async def background_model(self):
+        # The single overview worker can yield its lease between the writer and later stages.
+        # ExitStack releases only a lock this task actually acquired, including on shutdown.
+        async with AsyncExitStack() as lease:
+            await lease.enter_async_context(self.model.lock)
+            self.overview_lease = lease
+            try:
+                await self.model.ready()
+                yield
+            finally:
+                self.overview_lease = None
 
     async def close(self):
         self.worker.cancel()
@@ -449,7 +517,7 @@ class Insights:
                 raise ValueError("The timeline source exceeds the local model context.")
             count = max(2, count // 2)
 
-    async def write_overview(self, key, rows, language, expected):
+    async def write_overview(self, key, rows, language, expected, *, checkpoint_stages=True):
         locale = next(code for code, name in LANGUAGES.items() if name == language)
         transcript = excerpts(rows)
 
@@ -457,70 +525,125 @@ class Insights:
         policy = OVERVIEW_POLICY + f" Write the finished overview in {language}."
         with self.store.connection() as db:
             analytics = session_notes.speaker_context(db, key)
+            base_language = db.execute("SELECT base FROM notes WHERE id=?", (key,)).fetchone()[0]
         short = len(transcript) <= 600 and len(transcript.split()) <= 85
         count = min(len(rows), 1 if short else min(6, 2 + int(rows[-1]["start"] // 180)))
         fields = [f"anchor{i + 1}" for i in range(count)]
-        # Give the planner a few substantive options spread through each interval. Its
-        # full source remains intact. Repeated ASR filler contributes little vocabulary.
-        candidates = {}
-        for i, field in enumerate(fields):
-            region = rows[len(rows) * i // count:len(rows) * (i + 1) // count]
-            n = min(4, len(region))
-            choices = [region[len(region) * j // n:len(region) * (j + 1) // n] for j in range(n)]
-            candidates[field] = [max(group, key=lambda r: len(set(r["text"].casefold().split()[:65])))
-                                 for group in choices]
-        anchor_schema = {field: {"type": "integer", "enum": [r["id"] for r in options]}
-                         for field, options in candidates.items()}
+        index = overview_index(rows) if not short else rows
+        count = min(count, len(index))
+        fields = fields[:count]
+        options = {f: index[len(index) * i // count:len(index) * (i + 1) // count]
+                   for i, f in enumerate(fields)}
+        anchor_schema = {f: {"type": "integer", "enum": [r["id"] for r in group]} for f, group in options.items()}
+        sampling = {"temperature": .7, "top_p": .85, "top_k": 20, "min_p": 0., "presence_penalty": 1.4}
 
         async def plan():
             result = await self.model.structured(
-                "Choose a clear, substantive utterance from each recording interval. Return its passage ID "
-                "in the matching anchor field. In writerPrompt give one short editorial direction about "
-                "what to emphasize or group. Keep proposals and contrary replies together. Use the measured "
-                "speaker count and speaking times for perspective. Shares divide total speaking time and count "
-                "overlap for each speaker. Give brief but substantive remarks their due.",
-                transcript, obj(**anchor_schema, writerPrompt=STRING), 430,
-                context={"speakerAnalytics": analytics, "passageOptions": {field: excerpts(options)
-                         for field, options in candidates.items()}}, policy=policy, full_context=True)
+                "Choose a clearly intelligible exchange from each interval. Think about the subjects the "
+                "speakers return to, and replies that qualify a proposal. Write a short editorial instruction "
+                "about how to arrange the note. Leave interpretations and conclusions out of the guide. "
+                "Cover changes of subject in the "
+                "opening, middle and close. Speaker shares measure speaking time, including overlapping "
+                "voices. A brief interjection can matter. Use the passage numbers in each interval.",
+                transcript, obj(**anchor_schema, writerPrompt=STRING), 650, sampling=sampling,
+                context={"speakerAnalytics": analytics, "passageOptions": {f: excerpts(group) for f, group in options.items()}},
+                policy=policy, full_context=True)
             return {"topics": [result[f] for f in fields], "writerPrompt": result["writerPrompt"]}
 
-        guide = await self.checkpoint(key, GUIDE, plan, expected)
+        guide = await self.checkpoint(key, GUIDE, plan, expected) if checkpoint_stages else await plan()
+
+        # An exact quotation identifies the original passage even while the draft is streaming.
+        proofs = {field: {evidence_phrase(row): row for row in reversed(group)}
+                  for field, group in options.items()}
 
         def render(value):
             if short:
                 return {"lead": value.get("lead", ""), "markdown": ""}
-            points = [value[f].strip() for f in fields if value.get(f, "").strip()]
-            return {"lead": points[0] if points else "", "markdown": "\n".join("- " + p for p in points[1:])}
+            sections = []
+            for field in fields:
+                item = value.get(field) or {}
+                if item.get("heading"):
+                    sections.append("## " + item["heading"].strip())
+                if item.get("detail"):
+                    source = proofs[field].get(item.get("evidence"))
+                    detail = item["detail"].strip()
+                    sections.append(detail + (f" ⟦{source['start']:g}⟧" if source else ""))
+            return {"lead": value.get("lead", ""), "markdown": "\n\n".join(sections)}
 
         def check_note(value):
-            note = render(value)
-            validate_language([note["lead"], *([note["markdown"]] if note["markdown"] else [])], locale)
+            rendered = render(value)
+            validate_language([rendered["lead"]], locale)
+            if short:
+                return
+            bodies = [value[f]["detail"] for f in fields]
+            validate_language(bodies + [value[f]["heading"] for f in fields], locale)
+            seen = []
+            sentences = set()
+            for body in [rendered["lead"], *bodies]:
+                for sentence in re.split(r"(?<=[.!?؟。！？])\s+", body.strip()):
+                    normalized = " ".join(re.findall(r"[^\W_]+", sentence.casefold()))
+                    if len(normalized) > 15 and normalized in sentences:
+                        raise ValueError("A sentence repeats verbatim. Give each supported point once.")
+                    sentences.add(normalized)
+            for body in bodies:
+                words = re.findall(r"[^\W_]+", body.casefold())
+                if len("".join(words)) < 20 or body.rstrip()[-1:] in (",", "،", ":", "-", "(", "{"):
+                    raise ValueError("Finish every section with a complete substantive sentence.")
+                grams = set(zip(words, words[1:]))
+                if grams and any(len(grams & prior) / len(grams | prior) > .65 for prior in seen):
+                    raise ValueError("Two sections repeat the same point. Cover a different supported subject.")
+                seen.append(grams)
+            for field in fields:
+                item = value[field]
+                if base_language == locale and DECISION_CLAIM.search(item["detail"]):
+                    source = proofs[field][item["evidence"]]["id"]
+                    exchange = " ".join(row["text"] for row in rows if abs(row["id"] - source) <= 2)
+                    if not ACCEPTANCE.search(exchange) and DECISION_CLAIM.search(exchange) is None:
+                        raise ValueError("The selected exchange contains no explicit acceptance. "
+                                         "Describe the proposal as tentative, or cite its actual confirmation.")
+            if len({clean(value[f]["heading"]).casefold() for f in fields}) != len(fields):
+                raise ValueError("Use a distinct concrete heading for each subject.")
 
         async def draft():
-            evidence = {f: excerpts([r for r in rows if abs(r["id"] - anchor) <= 2])
-                        for f, anchor in zip(fields, guide["topics"], strict=True)}
-            optional_text = {"type": "string", "minLength": 0}
-            schema = obj(lead=STRING) if short else obj(**dict.fromkeys(fields, optional_text))
-            task = ("Write a single sentence." if short else
-                    "For each anchor give one short, concrete sentence about the subject in that excerpt. "
-                    "Paraphrase into natural written language. Use the full transcript for context. Leave the field empty "
-                    "for garbled speech or a subject already covered. Avoid inferred causes, identities and "
-                    "general lessons. No labels or passage IDs in the answer.")
+            # Preserve surrounding replies AND the breadth of the reading index. The planner's
+            # preferred anchor alone can miss a change of subject inside a long interval.
+            evidence = {}
+            for field, anchor in zip(fields, guide["topics"], strict=True):
+                selected = {r["id"] for r in options[field]}
+                selected.update(range(anchor - 2, anchor + 3))
+                evidence[field] = excerpts([r for r in rows if r["id"] in selected])
+            # Read the original words immediately before composing each section.
+            # The evidence is part of the model output and must exist in that time range.
+            sections = {field: obj(evidence={"type": "string", "enum": list(group)},
+                                   heading=STRING, detail=STRING) for field, group in proofs.items()}
+            schema = obj(lead=STRING) if short else obj(lead=STRING, **sections)
+            task = ("Answer in one sentence, preserving the final response." if short else
+                    "Write a useful meeting overview. Start with a short lead that captures how the whole "
+                    "conversation developed. For each interval give a concrete topic heading and one or two "
+                    "complete sentences. Cover a different substantive aspect in each section. Name the actual "
+                    "activities and ideas discussed. In the lead name the major subjects in plain language. "
+                    "Leave out biographies, diagnoses, metaphors and interpretations of unclear remarks. "
+                    "Select evidence with a clear identifiable subject, then summarize it without adding "
+                    "names, explanations or consequences. Leave an outcome open when the passage "
+                    "contains a question or proposal. Describe what "
+                    "that speaker said and any qualification in the surrounding replies. Treat the guide "
+                    "only as advice on structure. Omit any interpretation you cannot support. "
+                    "When a subject spans intervals, describe a new detail or differing view.")
 
             def preview(value):
                 note = render(value)
                 note_stream.patch(summary=note["lead"], markdown=note["markdown"])
-            instruction = (guide["writerPrompt"] + "\n\n" + task +
-                           " Report each excerpt on its own terms, including subjects outside the suggested focus. "
-                           "Keep a suggestion tentative unless a later speaker expressly accepts the same action. "
-                           "Retain conditions, objections and unresolved questions.")
+
+            instruction = (guide["writerPrompt"] + "\n\n" + task + f" Write the entire overview in {language}. "
+                           "Where someone is exploring partners or considering a future action, report that "
+                           "as a possibility until another speaker explicitly confirms it. Do not invent "
+                           "personal identities, reasons, diagnoses, figures or final agreements.")
             result = await self.model.structured(
-                instruction, transcript, schema, 220 if short else 1400,
+                instruction, transcript, schema, 220 if short else 2800, sampling=sampling,
                 context={"speakerAnalytics": analytics, "topicEvidence": evidence},
                 policy=policy, full_context=True, validate=check_note, on_partial=preview)
             note = render(result)
             if short and note["lead"].endswith(("?", "؟", "？")):
-                # If the writer merely echoes the question, retain the actual brief response.
                 utterances = [re.sub(r"^Speaker [A-Z]:\s*", "", r["text"]).strip() for r in rows]
                 for i, line in enumerate(utterances[:-1]):
                     if line.casefold() == note["lead"].casefold():
@@ -533,14 +656,29 @@ class Insights:
                         break
             return note
 
-        written = await self.checkpoint(key, SUMMARY, draft, expected)
-        summary = markdown_summary(written, rows if short else (), locale)
+        note_stream.patch(stage="writing")
+        self.writer_active = True
+        try:
+            written = await self.checkpoint(key, SUMMARY, draft, expected) if checkpoint_stages else await draft()
+            if getattr(self, "overview_lease", None) and self.chat_count:
+                await self.overview_lease.aclose()
+                await self.chats_done.wait()
+                await self.overview_lease.enter_async_context(self.model.lock)
+                await self.model.ready()
+        finally:
+            self.writer_active = False
+        # The saved long note is exactly the validated preview. Running a sentence
+        # filter after streaming could make whole sections disappear at completion.
+        summary = (markdown_summary(written, rows, locale) if short else
+                   {"summary": written["lead"], "markdown": written["markdown"]})
         note_stream.patch(**summary)
         return summary
 
     async def write(self, key, rows, language, expected):
         locale = next(code for code, name in LANGUAGES.items() if name == language)
         summary = await self.write_overview(key, rows, language, expected)
+
+        note_stream.patch(stage="title")
 
         async def name_session():
             result = await self.model.structured(
@@ -552,14 +690,19 @@ class Insights:
 
         title = await self.checkpoint(key, TITLE, name_session, expected)
         note_stream.patch(title=title["title"])
+        topics = await self.write_topics(key, rows, language, expected, title["title"], summary["summary"])
+        return {"title": clean(title["title"]), **summary, "topics": topics}
+
+    async def write_topics(self, key, rows, language, expected, title, lead):
+        note_stream.patch(stage="timeline")
 
         async def chapters():
             evidence = await self.timeline_source(key, rows, expected)
-            return await self.timeline(rows, evidence, language, title["title"], summary["summary"])
+            return await self.timeline(rows, evidence, language, title, lead)
 
         topics = await self.checkpoint(key, CHAPTERS, chapters, expected)
         note_stream.patch(topics=topics)
-        return {"title": clean(title["title"]), **summary, "topics": topics}
+        return topics
 
     async def timeline(self, rows, evidence, language, title, lead):
         locale = next(code for code, name in LANGUAGES.items() if name == language)
@@ -678,17 +821,21 @@ class Insights:
                 LOG.info("Keeping original descriptions for %d timeline chapters.", len(batch))
         return chapters
 
-    async def localize_metadata(self, original, language):
+    async def localize_metadata(self, original, language, *, topics_only=False):
         source_language = LANGUAGES.get(original.get("language"), "the source language")
         words = f"Translate the provided writing from {source_language} into {language}. Use fluent {language} for all output. "
         locale = next(code for code, name in LANGUAGES.items() if name == language)
-        title = await self.model.structured(
-            words + "Translate only this session title. Keep it specific and short, one to four words, five at most.",
-            original["title"], obj(translatedTitle=STRING), 65,
-            validate=lambda v: validate_translation([original["title"]], [v["translatedTitle"]], locale),
-            on_partial=lambda v: note_stream.patch(title=v.get("translatedTitle", "")))
-        version = {"title": await self.short_title(clean(title["translatedTitle"]), language), "topics": []}
-        note_stream.patch(title=version["title"])
+        version = {"topics": []}
+        if not topics_only:
+            note_stream.patch(stage="title")
+            title = await self.model.structured(
+                words + "Translate only this session title. Keep it specific and short, one to four words, five at most.",
+                original["title"], obj(translatedTitle=STRING), 65,
+                validate=lambda v: validate_translation([original["title"]], [v["translatedTitle"]], locale),
+                on_partial=lambda v: note_stream.patch(title=v.get("translatedTitle", "")))
+            version["title"] = await self.short_title(clean(title["translatedTitle"]), language)
+            note_stream.patch(title=version["title"])
+        note_stream.patch(stage="timeline")
         # The model translates strings. The application owns chapter identity, order and timestamps.
         for start in range(0, len(original["topics"]), 4):
             batch = original["topics"][start:start + 4]
@@ -709,18 +856,23 @@ class Insights:
         note_stream.patch(topics=version["topics"])
         return version
 
-    async def overview(self, key, target, base, expected):
+    async def overview(self, key, target, base, expected, scope=None):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             note_identity(db, key, expected)
             if session_notes.reuse_ready(db, key, target):
                 return
-            rows = passages(db, key)
+            saved = None
+            if scope is not None:
+                row = db.execute("SELECT body FROM overviews WHERE id=? AND lang=?", (key, target)).fetchone()
+                if not row or not row[0]:
+                    raise ValueError("A saved language version is required to regenerate one tab.")
+                saved = json.loads(row[0])
+            rows = None if scope == "timeline" and target != base else passages(db, key)
+            if rows == []:
+                raise ValueError("No transcript passages available.")
             parent = db.execute("SELECT body FROM overviews WHERE id=? AND lang=?", (key, base)).fetchone()
-        if not rows:
-            raise ValueError("No transcript passages available.")
-        async with self.model.lock:
-            await self.model.ready()
+        async with self.background_model():
             code = target
             if target == "und":
                 sample = [rows[i] for i in sorted({int((len(rows)-1)*j/5) for j in range(6)})]
@@ -728,15 +880,25 @@ class Insights:
                     "Identify the predominant language in the recording excerpts. Select its code from the catalog.",
                     {"excerpts": excerpts(sample), "catalog": LANGUAGES}, obj(code={"type": "string", "enum": list(LANGUAGES)}), 40)
                 code = detected["code"]
-            if target != base:
+            language = LANGUAGES[code]
+            if scope == "overview":
+                summary = await self.write_overview(key, rows, language, expected, checkpoint_stages=target == base)
+                version = {**saved, **summary}
+            elif scope == "timeline":
+                if target == base:
+                    topics = await self.write_topics(key, rows, language, expected, saved["title"], saved["summary"])
+                    version = {**saved, "topics": topics}
+                else:
+                    metadata = await self.localize_metadata(json.loads(parent[0]), language, topics_only=True)
+                    version = {**saved, **metadata}
+            elif target != base:
                 # Each language gets an overview of the original conversation. Only the short
                 # title and timestamped chapter labels/descriptions come from the base version.
-                language = LANGUAGES[code]
                 summary = await self.write_overview(key, rows, language, expected, checkpoint_stages=False)
                 metadata = await self.localize_metadata(json.loads(parent[0]), language)
                 version = {**summary, **metadata}
             else:
-                version = await self.write(key, rows, LANGUAGES[code], expected)
+                version = await self.write(key, rows, language, expected)
             with self.store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 note_identity(db, key, expected)

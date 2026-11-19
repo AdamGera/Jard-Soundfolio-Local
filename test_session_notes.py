@@ -8,7 +8,7 @@ import httpx
 import writing_cache
 from fastapi import FastAPI
 
-from session_notes import publish, selection
+from session_notes import RegenerationConflict, publish, selection
 from session_store import SessionStore
 from writing_api import router
 
@@ -158,6 +158,45 @@ class NoteStorageTests(unittest.TestCase):
                 self.assertIsNone(writing_cache.recall("existing"))
                 writing_cache.remember("existing", {"title": "regenerated"})
             self.assertEqual(writing_cache.recall("existing"), {"title": "automatic"})
+
+    def test_scoped_publication_preserves_sibling_and_other_language_after_restart(self):
+        saved = version("ar", "Original")
+        saved["extra"] = "legacy metadata"
+        with self.store.connection() as db:
+            publish(db, self.key, "ar", saved)
+        self.choose("en")
+        self.complete("en", "English")
+        with self.store.connection() as db:
+            selection(db, self.key, "auto", regenerate="timeline")
+            selection(db, self.key, "auto", regenerate="timeline")
+            with self.assertRaises(RegenerationConflict):
+                selection(db, self.key, "auto", regenerate="overview")
+        self.store = SessionStore(self.store.root)
+        with self.store.connection() as db:
+            value = selection(db, self.key)
+            self.assertEqual((value["scope"], value["version"]), ("timeline", saved))
+            self.assertEqual(db.execute("SELECT generation FROM overviews WHERE id=? AND lang='ar'",
+                                        (self.key,)).fetchone()[0], 1)
+            new_topics = [{"id": 2, "start": 6, "label": "New chapter"}]
+            publish(db, self.key, "ar", {**version("ar", "Unused"), "summary": "Unused", "topics": new_topics})
+            expected = {**saved, "topics": new_topics}
+            self.assertEqual(selection(db, self.key)["version"], expected)
+            selection(db, self.key, "auto", regenerate="overview")
+            db.execute("UPDATE overviews SET status='error' WHERE id=? AND lang='ar'", (self.key,))
+            retry = selection(db, self.key, "auto", retry=True)
+            self.assertEqual((retry["scope"], retry["version"]), ("overview", expected))
+            publish(db, self.key, "ar", {**version("ar", "Unused"), "summary": "New lead", "markdown": "New text"})
+            self.assertEqual(selection(db, self.key)["version"], {**expected, "summary": "New lead", "markdown": "New text"})
+            other = selection(db, self.key, "en")
+            self.assertEqual((other["status"], other["scope"], other["version"]), ("ready", None, version("en", "English")))
+
+    def test_scope_migration_preserves_old_published_session(self):
+        self.complete("ar", "Saved")
+        with self.store.connection() as db:
+            db.execute("ALTER TABLE overviews DROP COLUMN scope")
+        migrated = SessionStore(self.store.root).get(self.key)["overview"]
+        self.assertIsNone(migrated["scope"])
+        self.assertEqual(migrated["version"], version("ar", "Saved"))
 
     def test_refinalize_updates_transcript_and_bounds(self):
         self.complete("ar", "Old title")

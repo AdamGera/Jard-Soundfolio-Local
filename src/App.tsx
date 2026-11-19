@@ -456,6 +456,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       setPhase("recording")
     } catch (error) {
       nativeCapture.current = false
+      setPermissionGuide(null)
       setFeedback(message(error))
       setPhase("idle")
     }

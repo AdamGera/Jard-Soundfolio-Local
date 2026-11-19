@@ -111,6 +111,7 @@ def migrate(db):
         db.execute("ALTER TABLE overviews ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
     for table, columns in [
         ("notes", ("source_digest", "revision")),
+        ("overviews", ("scope",)),
         ("chat_turns", ("source_digest", "request_digest", "error")),
     ]:
         existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}

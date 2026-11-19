@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -5,9 +6,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from insights import excerpts, Insights, ObsoleteGeneration, note_identity, anchored_topics, markdown_summary, obj, STRING, validate_translation, validate_language, ground_quantities
-from local_qwen import LocalQwen, source_messages
+from local_qwen import LocalQwen, check_structure, source_messages
 from title_words import word_ends, compact_title
-from session_notes import passages
+from session_notes import passages, publish, selection
 from session_store import SessionStore
 
 
@@ -24,6 +25,11 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
                                      "words": []}, 4)
         self.store.finish(self.key)
         self.insights = object.__new__(Insights)
+        self.insights.chat_count = 0
+        self.insights.chats_done = asyncio.Event()
+        self.insights.chats_done.set()
+        self.insights.wake = asyncio.Event()
+        self.insights.writer_active = False
         self.insights.store = self.store
         self.insights.model = AsyncMock()
         self.insights.model.tokens.return_value = 42
@@ -33,15 +39,43 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_writer_receives_complete_transcript_and_guide_then_reuses_both_on_retry(self):
         rows = [{"id": i, "start": i, "text": f"Passage {i} with a different detail."} for i in range(1, 801)]
+        rows[-1]["text"] = "The closing exchange leaves the supplier agreement open pending a second bid."
         transcript = excerpts(rows)
-        guide = {"anchor1": 1, "anchor2": 200, "anchor3": 350, "anchor4": 500, "anchor5": 650, "anchor6": 800, "writerPrompt": "Lead with the revised launch date, then explain the distinct risks."}
-        summary = {"anchor1": "Initial topic.", "anchor2": "", "anchor3": "", "anchor4": "", "anchor5": "", "anchor6": "One risk is unresolved."}
+        prompt = "Cover the launch plan and distinguish proposed dates from commitments."
+        sections = [
+            ("Dates", "The team proposed Wednesday, pending confirmation from the venue."),
+            ("Budget", "Travel reimbursement still needs approval from the finance department."),
+            ("Staffing", "Several volunteers asked to work the morning shift."),
+            ("Equipment", "The facilitator outlined which microphones need fresh batteries."),
+            ("Schedule", "Lunch must fit between the two afternoon workshops."),
+            ("Purchasing", rows[-1]["text"]),
+        ]
+        summary = {"lead": "The team discussed the launch date, equipment and remaining approvals.",
+                   **{f"anchor{i}": {"heading": heading, "detail": detail}
+                      for i, (heading, detail) in enumerate(sections, 1)}}
         with self.store.connection() as db:
             activity = [{"speaker": 1, "seconds": 3, "share": .75}, {"speaker": 2, "seconds": 1, "share": .25}]
             db.execute("UPDATE sessions SET transcript=json_set(transcript,'$.speakerActivity',json(?)) WHERE id=?",
                        (json.dumps(activity), self.key))
         model = self.insights.model
-        model.structured.side_effect = [guide, summary, RuntimeError("title failed")]
+        def respond(instruction, data, schema, limit, **kwargs):
+            fields = schema["properties"]
+            if "writerPrompt" in fields:
+                return {name: prompt if name == "writerPrompt" else spec["enum"][-1]
+                        for name, spec in fields.items()}
+            if "title" in fields:
+                raise RuntimeError("title failed")
+            for i in range(1, len(sections) + 1):
+                field = f"anchor{i}"
+                source = fields[field]["properties"]["evidence"]["enum"][0]
+                summary[field]["evidence"] = source
+                opening, closing = [("«", "»"), ("“", "”"), ('"', '"')][(i - 1) % 3]
+                phrase = " ".join(source.split()[:3])
+                summary[field]["detail"] += f" {opening}{phrase}{closing}."
+            check_structure(summary, schema)
+            kwargs["validate"](summary)
+            return summary
+        model.structured.side_effect = respond
         with self.assertRaisesRegex(RuntimeError, "title failed"):
             await self.insights.write(self.key, rows, "English", self.expected)
         planner, writer, title_call = model.structured.call_args_list
@@ -52,17 +86,35 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
                                            {"label": "Speaker B", "seconds": 1, "sharePercent": 25}]})
         self.assertIn("[P800]", writer.kwargs["context"]["topicEvidence"]["anchor6"])
         self.assertEqual(len(planner.kwargs["context"]["passageOptions"]), 6)
-        self.assertIn(guide["writerPrompt"], writer.args[0])
+        self.assertIn(prompt, writer.args[0])
         self.assertEqual(planner.kwargs["policy"], writer.kwargs["policy"])
         self.assertTrue(planner.kwargs["full_context"] and writer.kwargs["full_context"])
         self.assertIn("transcript is the authority", writer.kwargs["policy"])
-        self.assertEqual(title_call.args[1]["summary"], summary["anchor1"])
+        self.assertEqual(title_call.args[1]["summary"], summary["lead"])
         model.structured.reset_mock()
         model.structured.side_effect = [{"title": "Friday launch"}]
         self.insights.timeline = AsyncMock(return_value=[{"id": 1, "start": 0, "label": "Launch", "detail": "Friday."}])
         result = await self.insights.write(self.key, rows, "English", self.expected)
         self.assertEqual(model.structured.call_count, 1)
-        self.assertEqual(result["markdown"], "- One risk is unresolved.")
+        self.assertIn("## Purchasing\n\n" + rows[-1]["text"], result["markdown"])
+        starts = {row["text"]: row["start"] for row in rows}
+        paragraphs = result["markdown"].split("\n\n")[1::2]
+        expected = [f"{item['detail']} ⟦{starts[item['evidence']]}⟧"
+                    for field, item in summary.items() if field != "lead"]
+        self.assertEqual(paragraphs, expected)
+
+        # Shape and content guards must reject a title-length response or recycled sections.
+        with self.assertRaises(ValueError):
+            check_structure({"lead": "Only three words."}, writer.args[2])
+        validate = writer.kwargs["validate"]
+        unsupported = {**summary["anchor1"], "detail": "The team agreed to book the venue on Wednesday."}
+        with self.assertRaisesRegex(ValueError, "no explicit acceptance"):
+            validate({**summary, "anchor1": unsupported})
+
+        for field, value in [("detail", "Very short."), ("detail", summary["anchor2"]["detail"]),
+                             ("heading", summary["anchor2"]["heading"])]:
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                validate({**summary, "anchor1": {**summary["anchor1"], field: value}})
 
     async def test_short_suggestion_keeps_qualifier_in_writer_context_and_uses_only_a_lead(self):
         rows = [{"id": 1, "start": 0, "text": "Speaker A: Maybe Wednesday, if the venue is free."},
@@ -87,6 +139,133 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
             {"anchor1": 1, "writerPrompt": "Explain the outcome."}, {"lead": "Should we book Wednesday?"}]
         result = await self.insights.write_overview(self.key, rows, "English", self.expected)
         self.assertEqual(result["summary"], "Should we book Wednesday? Yes, let's book it.")
+
+    def queue_tab(self, language, tab):
+        base = {"language": "en", "title": "Friday launch", "summary": "Saved English summary.",
+                "markdown": "Saved **English** details.", "extra": {"keep": True},
+                "topics": [{"id": 1, "start": 0.0, "label": "Date", "detail": "Previous English chapter."}]}
+        translated = {"language": "es", "title": "Lanzamiento", "summary": "Resumen guardado.",
+                      "markdown": "Detalles **guardados**.", "extra": {"keep": True},
+                      "topics": [{"id": 1, "start": 0.0, "label": "Fecha", "detail": "Capítulo anterior."}]}
+        with self.store.connection() as db:
+            publish(db, self.key, "en", base)
+            publish(db, self.key, "es", translated)
+            selection(db, self.key, language, regenerate=tab)
+        job = self.insights.next_job()
+        self.assertEqual((job[1], job[-1]), (language, tab))
+        return base if language == "en" else translated, job
+
+    def saved_tab(self, language):
+        with self.store.connection() as db:
+            row = db.execute("SELECT status,body FROM overviews WHERE id=? AND lang=?", (self.key, language)).fetchone()
+        self.assertEqual(row["status"], "ready")
+        return json.loads(row["body"])
+
+    async def test_base_overview_regenerates_just_guide_and_summary(self):
+        saved, job = self.queue_tab("en", "overview")
+        self.insights.model.structured.side_effect = [
+            {"anchor1": 1, "writerPrompt": "Describe the date."}, {"lead": "The launch is Friday."}]
+        await self.insights.overview(*job)
+        self.assertEqual(self.saved_tab("en"), {**saved, "summary": "The launch is Friday.", "markdown": ""})
+        self.assertEqual(self.insights.model.structured.await_count, 2)
+        with self.store.connection() as db:
+            parts = [row[0] for row in db.execute("SELECT part FROM window_notes WHERE id=? ORDER BY part", (self.key,))]
+        self.assertEqual(parts, [-3, -1])
+
+    async def test_chat_waits_for_writer_checkpoint_and_runs_before_later_stages(self):
+        engine = self.insights
+        writer_started, release_writer = asyncio.Event(), asyncio.Event()
+        chat_started, release_chat = asyncio.Event(), asyncio.Event()
+        engine.model.lock = asyncio.Lock()
+        calls = []
+        async def generate(instruction, data, schema, *args, **kwargs):
+            if "writerPrompt" in schema["properties"]:
+                calls.append("planner")
+                return {"anchor1": 1, "writerPrompt": "Summarize the date."}
+            if "lead" in schema["properties"]:
+                calls.append("writer")
+                writer_started.set()
+                await release_writer.wait()
+                return {"lead": "The launch is Friday."}
+            calls.append("title")
+            return {"title": "Friday launch"}
+        engine.model.structured.side_effect = generate
+        engine.timeline = AsyncMock(return_value=[{"id": 1, "start": 0, "label": "Date", "detail": "Friday."}])
+        job = engine.next_job()
+        engine.active_job = asyncio.create_task(engine.overview(*job))
+        async def chat():
+            async with engine.chat_priority():
+                calls.append("chat")
+                chat_started.set()
+                await release_chat.wait()
+        async with asyncio.timeout(2):
+            await writer_started.wait()
+            chat_task = asyncio.create_task(chat())
+            await asyncio.sleep(0)
+            self.assertEqual(engine.chat_count, 1)
+            self.assertFalse(chat_started.is_set())
+            release_writer.set()
+            await chat_started.wait()
+            self.assertEqual(calls, ["planner", "writer", "chat"])
+            with self.store.connection() as db:
+                checkpoint = db.execute("SELECT data FROM window_notes WHERE id=? AND part=-3", (self.key,)).fetchone()
+                self.assertEqual(json.loads(checkpoint[0])["lead"], "The launch is Friday.")
+            release_chat.set()
+            await asyncio.gather(chat_task, engine.active_job)
+        self.assertEqual(calls, ["planner", "writer", "chat", "title"])
+        self.assertEqual(self.saved_tab("en")["title"], "Friday launch")
+
+    async def test_chat_still_preempts_background_analysis(self):
+        engine = self.insights
+        engine.model.lock = asyncio.Lock()
+        planner_started = asyncio.Event()
+        async def plan(*args, **kwargs):
+            planner_started.set()
+            await asyncio.Event().wait()
+        engine.model.structured.side_effect = plan
+        engine.active_job = asyncio.create_task(engine.overview(*engine.next_job()))
+        async with asyncio.timeout(2):
+            await planner_started.wait()
+            async with engine.chat_priority():
+                self.assertTrue(engine.active_job.cancelled())
+        with self.store.connection() as db:
+            self.assertFalse(db.execute("SELECT 1 FROM window_notes WHERE id=?", (self.key,)).fetchone())
+
+    async def test_base_timeline_uses_saved_title_and_summary_without_running_overview(self):
+        saved, job = self.queue_tab("en", "timeline")
+        topics = [{"id": 1, "start": 0.0, "label": "Launch date", "detail": "Friday confirmed."}]
+        with patch.object(self.insights, "timeline", new_callable=AsyncMock, return_value=topics) as timeline:
+            await self.insights.overview(*job)
+        self.assertEqual(timeline.await_args.args[-2:], (saved["title"], saved["summary"]))
+        self.insights.model.structured.assert_not_awaited()
+        self.assertEqual(self.saved_tab("en"), {**saved, "topics": topics})
+
+    async def test_translated_overview_writes_from_transcript_without_using_base_checkpoints(self):
+        saved, job = self.queue_tab("es", "overview")
+        with self.store.connection() as db:
+            db.execute("INSERT INTO window_notes VALUES(?,?,?)", (self.key, -3, '{"lead": "English checkpoint."}'))
+        self.insights.model.structured.side_effect = [
+            {"anchor1": 1, "writerPrompt": "Indica la fecha."}, {"lead": "El lanzamiento será el viernes."}]
+        await self.insights.overview(*job)
+        self.assertEqual(self.saved_tab("es"), {**saved, "summary": "El lanzamiento será el viernes.", "markdown": ""})
+        self.assertEqual(self.insights.model.structured.await_count, 2)
+        with self.store.connection() as db:
+            parts = [tuple(row) for row in db.execute("SELECT part,data FROM window_notes WHERE id=?", (self.key,))]
+        self.assertEqual(parts, [(-3, '{"lead": "English checkpoint."}')])
+
+    async def test_translated_timeline_runs_only_chapters_after_failed_base_refresh(self):
+        saved, job = self.queue_tab("es", "timeline")
+        with self.store.connection() as db:
+            db.execute("UPDATE overviews SET status='error',scope='overview' WHERE id=? AND lang='en'", (self.key,))
+        self.assertEqual(self.insights.next_job(), job)
+        self.insights.model.structured.return_value = {"chapter1": {"label": "Lanzamiento", "detail": "Es el viernes."}}
+        with patch("insights.passages", side_effect=AssertionError("Translation should use the saved chapters.")):
+            await self.insights.overview(*job)
+        request = self.insights.model.structured
+        self.assertEqual(request.await_count, 1)
+        self.assertEqual(request.await_args.args[1], {"chapter1": {"label": "Date", "detail": "Previous English chapter."}})
+        self.assertEqual(self.saved_tab("es"), {**saved, "topics": [
+            {"id": 1, "start": 0.0, "label": "Lanzamiento", "detail": "Es el viernes."}]})
 
     async def test_localization_keeps_exact_anchor_and_order(self):
         original = {"title": "Friday", "summary": "The launch is Friday.", "markdown": "## Date\n\n- Friday.",

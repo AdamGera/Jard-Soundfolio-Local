@@ -49,7 +49,7 @@ class Previews:
     def track(self, key, language):
         with self.watch(key, language) as channel:
             token = _current.set(channel)
-            channel.update({"language": language})
+            channel.update({"language": language, "stage": "analysis"})
             try:
                 yield
             finally:

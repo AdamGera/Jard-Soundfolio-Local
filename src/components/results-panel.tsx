@@ -100,20 +100,20 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     if (!strip || !active || strip.scrollWidth === strip.clientWidth) return
     strip.scrollLeft += active.getBoundingClientRect().left - strip.getBoundingClientRect().left - (strip.clientWidth - active.offsetWidth) / 2
   }, [tab])
-  const draft = overview.draft
+  const writingTab = tab === "overview" || tab === "timeline" ? tab : null
+  const showWritingStatus = !writing?.scope || tab === writing.scope
+  const draft = showWritingStatus ? overview.draft : null
   const note = draft?.summary || draft?.markdown ? draft : version
   const timeline = draft?.topics.length ? draft : version
   const showingPrevious = version && (tab === "timeline" ? timeline === version : note === version)
-  const stage = draft?.topics.length ? "Writing topic timeline…" : draft?.markdown || draft?.summary ? "Writing summary…" :
-    draft?.title ? "Writing title…" : null
   const chapter = timeline?.topics.findLastIndex(t => t.start != null && t.start <= player.time) ?? -1
-  const status = overview.error || writing?.error
+  const status = (!overview.errorTab || overview.errorTab === tab ? overview.error : "") || writing?.error
   const pending = writing?.status === "queued" || !writing
-  const noteStatus = status || pending || writing?.status === "empty" ? <div className="note-state">
+  const noteStatus = showWritingStatus && (status || pending || writing?.status === "empty") ? <div className="note-state">
     <p className="note-status" role={status ? "alert" : "status"}>
       {!status && pending && <i className="thinking-dot" />}
       {status || (writing?.status === "empty" ? "No speech detected." :
-        stage ?? (writing?.target && writing.target !== "und" ? `Creating ${languageName(writing.target)} overview…` : "Preparing overview…"))}
+        overview.stageLabel ?? (writing?.scope === "timeline" ? "Writing topic timeline…" : writing?.target && writing.target !== "und" ? `Creating ${languageName(writing.target)} overview…` : "Preparing overview…"))}
       {status && <Button size="xs" variant="ghost" onClick={overview.retry}>Retry</Button>}
     </p>
     {showingPrevious && <small>Showing saved {languageName(version.language)} {tab === "timeline" ? "timeline" : "overview"}</small>}
@@ -126,10 +126,10 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
         <span><Clock3 aria-hidden="true" /><bdi>{clock(result.durationSeconds ?? 0)}</bdi></span>
         {writing?.status !== "empty" && <OverviewLanguage detected={writing?.autoLanguage ?? ""}
           value={writing?.preference ?? "auto"} onSelect={overview.select} />}
-        {writing && writing.status !== "empty" && <Button size="sm" variant="ghost" className="regenerate-note"
-          aria-label="Regenerate overview and timeline" title="Regenerate overview and timeline"
+        {writingTab && version && writing && version.language === writing.target && <Button size="sm" variant="ghost" className="regenerate-note"
+          aria-label={`Regenerate ${writingTab}`} title={`Regenerate ${writingTab}`}
           disabled={writing.status === "queued" || overview.requesting}
-          onClick={overview.regenerate}><RotateCw aria-hidden="true" /><span>Regenerate</span></Button>}
+          onClick={() => overview.regenerate(writingTab)}><RotateCw aria-hidden="true" /><span>Regenerate</span></Button>}
       </div>
     </header>}
     <Tabs className="transcript-panel" data-finding={findOpen && tab === "transcript"} value={tab} onValueChange={changeTab}>
@@ -152,7 +152,9 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
         {noteStatus}
         {note && <div className="overview-copy" dir="auto" lang={note.language}>
           {note.summary && <p className="note-lead">{note.summary}</p>}
-          {note.markdown && <Suspense fallback={null}><NoteMarkdown text={note.markdown} /></Suspense>}
+          {note.markdown && <Suspense fallback={null}>
+            <NoteMarkdown text={note.markdown} ready={ready} cite={seconds => seek(seconds, true)} />
+          </Suspense>}
         </div>}
       </TabsContent>}
       {complete && <TabsContent value="timeline" className="note-body timeline-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
