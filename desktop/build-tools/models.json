@@ -1,0 +1,128 @@
+[
+  {
+    "file": "LICENSE",
+    "size": 11358,
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/LICENSE"
+  },
+  {
+    "file": "README.md",
+    "size": 4427,
+    "sha256": "1a9ed9aaa164665ef3d0e42a581ee2873fd99769e5cff67479164d385c036007",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/README.md"
+  },
+  {
+    "file": "added_tokens.json",
+    "size": 1639,
+    "sha256": "ca825ba68681938616256c9a740b1bf1a5c226b64f0c65fb1abec023eeb6145e",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/added_tokens.json"
+  },
+  {
+    "file": "chat_template.jinja",
+    "size": 2963,
+    "sha256": "8b8a3e50fbe1e81172210fa822efe2b3c59f9fa3f10c847d906f45201b3c1133",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/chat_template.jinja"
+  },
+  {
+    "file": "config.json",
+    "size": 2710,
+    "sha256": "d26bf65930f3a74b44a781ddb007cd206cacb080b618f9ec96ce05392cb7f166",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/config.json"
+  },
+  {
+    "file": "generation_config.json",
+    "size": 162,
+    "sha256": "14c323ea60f6cb2638bb5a9265aee48a12856df12bdd18a18e86c4642f05e117",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/generation_config.json"
+  },
+  {
+    "file": "merges.txt",
+    "size": 1075910,
+    "sha256": "ca57770275b525f8766ed68bf4b2d1d66b85adc41b06d8b5686cc3ca2b808aa9",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/merges.txt"
+  },
+  {
+    "file": "model.safetensors",
+    "size": 1017318776,
+    "sha256": "6dc35af40ad150e50767382a9d401eb9af9c3a1ad4e915c61fe05aecfa79a3e1",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/model.safetensors"
+  },
+  {
+    "file": "preprocessor_config.json",
+    "size": 356,
+    "sha256": "68c5de218c110e61edded1fea3ecf5d6c5adf672b904db079178e08b86267542",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/preprocessor_config.json"
+  },
+  {
+    "file": "processor_config.json",
+    "size": 487,
+    "sha256": "bc0b230081b44e629dd5b9045b78495615c1831b4b9f4cffe97bd37e82a6156a",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/processor_config.json"
+  },
+  {
+    "file": "special_tokens_map.json",
+    "size": 4264,
+    "sha256": "ced5ccb5336053ae8516dfb0dbab8498dfff73150d67d5a29f403471bba8d988",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/special_tokens_map.json"
+  },
+  {
+    "file": "tokenizer.json",
+    "size": 7422837,
+    "sha256": "60d63d6d615abcf61470a29a74b8c7434a96f87f2e97bca710cb767e076c0040",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/tokenizer.json"
+  },
+  {
+    "file": "tokenizer_config.json",
+    "size": 1553,
+    "sha256": "2944cf276398122da92b51369aa336b11f729573905a27af7ee7c2fb772f2e62",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/tokenizer_config.json"
+  },
+  {
+    "file": "vocab.json",
+    "size": 1961918,
+    "sha256": "c5e356c0638515539c196bca5da724fcf35a91fceaf1a2204c2a7193adc21059",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/vocab.json"
+  },
+  {
+    "file": "ctc/ctc_head.safetensors",
+    "size": 357476284,
+    "sha256": "c13befc1c60a8410185a730cdccefc825df12ac8af75d4411fdff8106291ede7",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/ctc/ctc_head.safetensors"
+  },
+  {
+    "file": "ctc/ctc_vocab.json",
+    "size": 686547,
+    "sha256": "aef67986e0140f74523e0ed830d1788154540c02779a63f0ec4e6606ff7f4307",
+    "url": "https://huggingface.co/Reson8/Rumble-2-Flash/resolve/92ec9141fb1178c5e77fd0020fe86a33c355060b/ctc/ctc_vocab.json"
+  },
+  {
+    "file": "nemotron3/README.md",
+    "size": 44081,
+    "sha256": "111370508eeeb0f397b13cef6c0d5c6cfa55a0f7089c8df7dd54dd2e8e597e86",
+    "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/52a432672732425e4c19765b9fec9b5810e6f4ba/README.md"
+  },
+  {
+    "file": "nemotron3/config.json",
+    "size": 1458,
+    "sha256": "dd795ec07ffa09acf18d231aa3fa8642aa5c521760953754e02559a7413b6873",
+    "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/52a432672732425e4c19765b9fec9b5810e6f4ba/config.json"
+  },
+  {
+    "file": "nemotron3/processor_config.json",
+    "size": 623,
+    "sha256": "91726746788a024a2f0f2f699a6c3667f0d74e6a0e9288fc44fe3018e23af68e",
+    "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/52a432672732425e4c19765b9fec9b5810e6f4ba/processor_config.json"
+  },
+  {
+    "file": "nemotron3/model.safetensors",
+    "size": 396954592,
+    "sha256": "c074d86335b3b794f8fa5edc25594558f128bdb3914d27806a3a5a2e44963cb6",
+    "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/52a432672732425e4c19765b9fec9b5810e6f4ba/model.safetensors"
+  },
+  {
+    "file": "qwen/Qwen3.5-2B-Q8_0.gguf",
+    "size": 2076674560,
+    "sha256": "be5b6f17394f71bb15629a7e115f3a62d8b3c1de90387770b0d3012bed0c01a5",
+    "url": "https://huggingface.co/axteam/Qwen3.5-2B-GGUF/resolve/271502ee0817e5f4ac3242ae5b1d334f74939871/Qwen3.5-2B-Q8_0.gguf"
+  }
+]

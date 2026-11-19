@@ -126,14 +126,14 @@ class SessionStore:
             with db:
                 yield db
 
-    def create(self, source, name, mime, options, duration):
-        key = str(uuid4())
+    def create(self, source, name, mime, options, duration, *, key=None):
+        key = key or str(uuid4())
         created = datetime.now(timezone.utc).isoformat()
         name = Path(name or "").name.strip()[:240] or ("Recording" if options["recording"] else "Audio")
         mime = mime.partition(";")[0].lower()
         suffix = Path(name).suffix.lower()
         if options["recording"] or not suffix[1:].isalnum() or len(suffix) > 10:
-            suffix = {"audio/mp4": ".m4a", "video/webm": ".webm", "audio/webm": ".webm"}.get(mime) or mimetypes.guess_extension(mime) or ".audio"
+            suffix = {"audio/mp4": ".m4a", "audio/wav": ".wav", "video/webm": ".webm", "audio/webm": ".webm"}.get(mime) or mimetypes.guess_extension(mime) or ".audio"
         mime = mimetypes.guess_type("source" + suffix)[0] or mime
         if not mime.startswith("audio/") and mime not in ("video/webm", "video/mp4"):
             mime = "application/octet-stream"
@@ -146,6 +146,8 @@ class SessionStore:
                 db.execute("""INSERT INTO sessions(id,name,created,filename,mime,options,duration)
                               VALUES (?,?,?,?,?,?,?)""", (key, name, created, filename, mime, encode(options), duration))
         except BaseException:
+            if (folder / filename).exists():
+                os.replace(folder / filename, source)
             shutil.rmtree(folder)
             raise
         return key, folder / filename
@@ -191,14 +193,39 @@ class SessionStore:
             row = db.execute("SELECT * FROM sessions WHERE id=?", (key,)).fetchone()
             if not row:
                 raise MissingSession(key)
-            overview = session_notes.selection(db, key)
-            options = json.loads(row["options"])
-            return {**{k: row[k] for k in ("id", "name", "created", "duration", "status")},
-                    **options, "overview": overview,
-                    "name": overview["version"]["title"] if overview and overview["version"] else row["name"],
-                    "audioName": row["name"] + Path(row["filename"]).suffix if options["recording"] else row["name"],
-                    "audioPath": f"audio/{key}/{row['filename']}", "audioUrl": f"/api/sessions/{key}/audio",
-                    "transcript": self._result(db, row)}
+            return {**self._metadata(db, row), "transcript": self._result(db, row)}
+
+    def _metadata(self, db, row):
+        key = row["id"]
+        overview = session_notes.selection(db, key)
+        options = json.loads(row["options"])
+        return {**{k: row[k] for k in ("id", "name", "created", "duration", "processed", "status")},
+                **options, "overview": overview,
+                "name": overview["version"]["title"] if overview and overview["version"] else row["name"],
+                "audioName": row["name"] + Path(row["filename"]).suffix if options["recording"] else row["name"],
+                "audioPath": f"audio/{key}/{row['filename']}", "audioUrl": f"/api/sessions/{key}/audio"}
+
+    def page(self, key, offset, limit, query):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""SELECT id,name,filename,created,duration,processed,status,error,options
+                                FROM sessions WHERE id=?""", (key,)).fetchone()
+            if row is None:
+                raise MissingSession(key)
+            # Apply the filter after calculating original positions, so search hits
+            # retain their true playback offsets. Only page-sized payloads reach Python.
+            db.create_function("fold", 1, str.casefold, deterministic=True)
+            condition = " AND instr(fold(json_extract(payload,'$.text')),?)" if query else ""
+            params = (key, query.casefold()) if query else (key,)
+            total = db.execute("SELECT count(*) FROM chunks WHERE session_id=?" + condition, params).fetchone()[0]
+            rows = db.execute("""SELECT * FROM (
+                    SELECT row_number() OVER (ORDER BY seconds)-1 AS idx,
+                           lag(seconds,1,0) OVER (ORDER BY seconds) AS start,seconds,payload
+                    FROM chunks WHERE session_id=?
+                ) WHERE 1=1""" + condition + " ORDER BY seconds LIMIT ? OFFSET ?", (*params, limit, offset))
+            chunks = [{**json.loads(c["payload"]), "index": c["idx"], "start": c["start"], "end": c["seconds"]} for c in rows]
+            return {**self._metadata(db, row), "interruption": row["error"], "offset": offset,
+                    "nextOffset": offset + limit if offset + limit < total else None, "totalChunks": total, "chunks": chunks}
 
     def media(self, key):
         with self.connection() as db:
