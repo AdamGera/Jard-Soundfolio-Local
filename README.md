@@ -12,15 +12,21 @@ At Jard (Joint AI Research & Dynamics), we believe inference belongs close to th
 
 ### Mac application
 
-**[Download Jard Soundfolio Local for Apple Silicon (.dmg)](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.1.0/Jard-Soundfolio-Local-arm64.dmg)** · [Matching native source (.zip)](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.1.0/Jard-Soundfolio-Local-native-source.zip)
+**[Download Jard Soundfolio Local for Apple Silicon (.dmg)](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-arm64.dmg)** · [Matching native source (.zip)](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-native-source.zip)
 
-The v0.1.0 native download has an ad-hoc signature and has not been notarized by Apple. Gatekeeper may block it on first launch.
+The native download has an ad-hoc signature and has not been notarized by Apple. Gatekeeper may block it on first launch.
 
 On an Apple Silicon Mac running macOS 26 or later, drag **Jard Soundfolio Local.app** from the disk image to **Applications**, then open it from there. On first launch, choose the existing `model/` folder from a source installation or download the models (3.86 GB). The app includes its own runtime. Its sidebar opens the same local library as the browser.
 
 To record a call, select **Microphone + Mac audio** and press **Record**. Grant the requested Microphone and Screen & System Audio Recording permissions in macOS. The app shows the active Mac input by name and a level meter for each source. Choose the built-in or headset microphone in System Settings → Sound → Input. Mac audio comes directly from macOS, so Zoom, Meet and other apps can play through your headphones. **Stop** saves the mix and starts the final transcript. Select **Microphone only** or **Mac audio only** for a single source.
 
 Use **File → Open in Browser** to open the same workspace alongside the Mac window. To build the app and its disk image, see the [Mac build instructions](desktop/build-tools/README.md).
+
+#### Updating the Mac app
+
+If you have v0.1.0, install the current DMG once. Your recordings and downloaded models are stored separately from the application. Starting with v0.1.1, choose **Jard Soundfolio Local → Check for Updates…** to check GitHub. The app also checks when it opens. Turn off **Check for Updates on Launch** in the same menu for manual checks only. These requests send no recordings, transcripts, or notes.
+
+When a newer version is available, finish any recording and choose **Install Update**, or choose **Later**. The app verifies Jard’s release signature and the downloaded archive before replacing itself and reopening. Install it in a writable Applications folder first.
 
 #### First recording and missing permissions
 

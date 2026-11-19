@@ -82,6 +82,7 @@ def assemble(app):
     with info_file.open("rb") as data:
         info = plistlib.load(data)
     info.update({
+        "JardUpdates": json.loads((DESKTOP / "app.json").read_bytes())["updates"],
         "LSMinimumSystemVersion": "26.0",
         "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
         "NSHumanReadableCopyright": "Copyright © 2026 Jard (Joint AI Research & Dynamics)",
@@ -145,7 +146,13 @@ def main():
     parser.add_argument("--identity", default="-", help="Developer ID Application signing identity (default: local ad hoc)")
     parser.add_argument("--notary-profile", help="Keychain notarytool profile for publishing")
     parser.add_argument("--dmg", action="store_true")
+    parser.add_argument("--update-key", type=Path, help="Sign an installable update ZIP and feed with an external Ed25519 seed")
+    parser.add_argument("--notes", default="", help="Release notes shown in the native update prompt")
     opts = parser.parse_args()
+    if opts.update_key:
+        opts.update_key = opts.update_key.expanduser().resolve()
+        if opts.update_key.is_relative_to(REPO) or not opts.update_key.is_file():
+            parser.error("Use a private update signing key stored outside the checkout.")
     if opts.notary_profile and opts.identity == "-":
         parser.error("Notarization needs a Developer ID Application identity.")
     CACHE.mkdir(exist_ok=True)
@@ -165,6 +172,17 @@ def main():
         sign(app, opts.identity)
         if opts.notary_profile:
             notarize(app, opts.notary_profile)
+        if opts.update_key:
+            with (app / "Contents/Info.plist").open("rb") as stream:
+                version = plistlib.load(stream)["CFBundleVersion"]
+            archive = stage / "Jard-Soundfolio-Local-arm64.zip"
+            # The installer expects exactly one top-level .app, including its symlinks and executable modes.
+            run("ditto", "-c", "-k", "--norsrc", "--keepParent", app, archive)
+            url = f"https://github.com/AdamGera/Soundfolio-Local/releases/download/v{version}/{archive.name}"
+            feed = stage / "native-update.json"
+            run("native", "update", "sign", "--manifest", DESKTOP / "app.json",
+                "--target", "macos-aarch64", "--archive", archive, "--url", url,
+                "--notes", opts.notes, "--private-key", opts.update_key, "--output", feed)
         if opts.dmg or opts.notary_profile:
             image_root = stage / "image"
             image_root.mkdir()
@@ -183,6 +201,9 @@ def main():
         if output.exists():
             output.rename(stage / "previous.app")
         app.rename(output)
+        if opts.update_key:
+            archive.replace(OUT / archive.name)
+            feed.replace(OUT / feed.name)
         print(output)
 
 

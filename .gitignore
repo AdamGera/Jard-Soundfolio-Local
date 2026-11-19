@@ -71,3 +71,6 @@ sessions.sql.*
 *.webm
 *.p12
 *.p8
+
+# Private Ed25519 update signing seed
+native-update.key

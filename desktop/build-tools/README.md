@@ -23,3 +23,17 @@ For an isolated test, set `RUMBLE_DATA_DIR` to a fresh private temporary directo
 Model provenance and SHA-256 digests live in `models.json`. The v0.1.0 release identifies the ad-hoc build in its download notes. For a Developer ID release, verify notarization and stapling and test the downloaded DMG on a separate clean Apple Silicon Mac.
 
 To run the packaged smoke test, pass the built app path to `desktop/build-tools/smoke-package.py`. Add `--models /path/to/model` to exercise real local inference, word timing, speaker labels, and playback. The test creates a temporary copy of the verified weights, runs the bundle using the system PATH, and removes its own library on exit.
+
+## Publishing in-app updates
+
+Increment the version in `desktop/app.json` and run the build from a clean checkout. Jard's update public key is in that manifest. The private Ed25519 seed belongs to the release maintainer. Keep a secure backup outside the repository. Installed apps trust that key for future updates.
+
+```sh
+python3 desktop/build-tools/package.py --dmg \
+  --update-key "$HOME/.config/jard/soundfolio-local/native-update.key" \
+  --notes "Describe what changed in this version."
+```
+
+Create a draft GitHub release tagged `v<version>` at the build commit. Attach the DMG as `Jard-Soundfolio-Local-arm64.dmg`, the matching source as `Jard-Soundfolio-Local-native-source.zip`, and both generated update files, `Jard-Soundfolio-Local-arm64.zip` and `native-update.json`. Publish it as the latest stable release once all four assets are present. The app reads the feed from the latest release and downloads the version-specific ZIP only after the user chooses to install. Leave the assets at their published URLs.
+
+Forks distributing their own builds should generate their own key with `native update keygen --private-key /private/path/native-update.key` and configure their public key and release URLs before shipping.

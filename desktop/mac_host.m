@@ -250,7 +250,14 @@
     [self invoke:@{@"id": @"native.browser", @"command": @"jard.open", @"payload": @{}} origin:self.origin];
 }
 
+- (void)toggleAutomaticUpdates:(NSMenuItem *)item {
+    BOOL enabled = item.state != NSControlStateValueOn;
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:@"JardCheckForUpdatesOnLaunch"];
+    item.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleAutomaticUpdates:)) return YES;
     return self.showingApp && !self.closing;
 }
 
@@ -299,10 +306,25 @@ int main(void) {
 #endif
         NSString *setup = [NSString stringWithContentsOfURL:setupURL encoding:NSUTF8StringEncoding error:nil];
         if (!setup) setup = @"<p>The setup page is missing. Reinstall Jard Soundfolio Local.</p>";
-        app.host = native_sdk_appkit_create(SDK_BYTES(title), SDK_BYTES(title), SDK_BYTES(@"0.1.0"),
+        NSString *version = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"0.0.0";
+        app.host = native_sdk_appkit_create(SDK_BYTES(title), SDK_BYTES(title), SDK_BYTES(version),
             SDK_BYTES(@"Private local audio transcription"), 1, 0, 1, SDK_BYTES(title), SDK_BYTES(identifier),
             NULL, 0, SDK_BYTES(@"main"), 0, 0, 1050, 760, 0, 2, 1, 1, 2 /* hidden_inset_tall */, 0, 0);
         if (!app.host) return 1;
+        NSDictionary *updates = [bundle objectForInfoDictionaryKey:@"JardUpdates"];
+        NSString *feed = updates[@"feed_url"];
+        NSString *key = updates[@"public_key"];
+        if (feed.length && key.length) {
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            [defaults registerDefaults:@{@"JardCheckForUpdatesOnLaunch": updates[@"check_on_start"] ?: @NO}];
+            BOOL automatic = [defaults boolForKey:@"JardCheckForUpdatesOnLaunch"];
+            native_sdk_appkit_configure_updates(app.host, SDK_BYTES(feed), SDK_BYTES(key), automatic, SDK_BYTES(@"macos-aarch64"));
+            NSMenu *menu = NSApp.mainMenu.itemArray.firstObject.submenu;
+            NSMenuItem *toggle = [menu insertItemWithTitle:@"Check for Updates on Launch"
+                action:@selector(toggleAutomaticUpdates:) keyEquivalent:@"" atIndex:2];
+            toggle.target = app;
+            toggle.state = automatic ? NSControlStateValueOn : NSControlStateValueOff;
+        }
         [app installWindowChrome];
         NSMenu *file = [NSApp.mainMenu itemWithTitle:@"File"].submenu;
         NSMenuItem *open = [file insertItemWithTitle:@"Open in Browser" action:@selector(openBrowser:) keyEquivalent:@"b" atIndex:0];
