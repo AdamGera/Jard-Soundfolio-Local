@@ -1,5 +1,7 @@
 # Jard Soundfolio Local
 
+**[Download for Mac (.dmg)](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.0.5/Jard-Soundfolio-Local-arm64.dmg)** · v0.0.5 · Apple Silicon · macOS 26+
+
 *Your recordings, transcripts, and notes stay on your Mac.*
 
 Record a conversation or open an audio file on an Apple Silicon Mac. Search the transcript, see who spoke, and jump from a note or chat answer to the moment you want to hear again. Setup downloads the models once. After that, transcription, speaker labeling, and writing work offline.
@@ -12,9 +14,7 @@ At Jard (Joint AI Research & Dynamics), we believe inference belongs close to th
 
 ### Mac application
 
-**[Download Jard Soundfolio Local for Apple Silicon (.dmg)](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-arm64.dmg)** · [Matching native source (.zip)](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-native-source.zip)
-
-The native download has an ad-hoc signature and has not been notarized by Apple. Gatekeeper may block it on first launch.
+Jard signs the Mac download with its publisher certificate. Apple has not notarized this release, so Gatekeeper may block it on first launch.
 
 On an Apple Silicon Mac running macOS 26 or later, drag **Jard Soundfolio Local.app** from the disk image to **Applications**, then open it from there. On first launch, choose the existing `model/` folder from a source installation or download the models (3.86 GB). The app includes its own runtime. Its sidebar opens the same local library as the browser.
 
@@ -28,7 +28,7 @@ The current release is **v0.0.5**. From v0.0.4, choose **Jard Soundfolio Local �
 
 When a newer version is available, finish any recording and choose **Install Update**, or choose **Later**. The app verifies Jard’s release signature and the downloaded archive before replacing itself and reopening. Install it in a writable Applications folder first.
 
-macOS can ask for recording access again after an update because each ad-hoc build has a different code signature. If **Recording access** shows Mac audio as **Unconfirmed**, choose **Verify Mac audio access**. This asks ScreenCaptureKit to check access without recording. An enabled switch in System Settings can belong to an earlier build. [How macOS recognizes an app across updates](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
+When updating from the ad-hoc signed v0.0.4 build, macOS may ask you to grant recording access again for the new publisher signature. If **Recording access** shows Mac audio as **Unconfirmed**, choose **Verify Mac audio access**. This asks ScreenCaptureKit to check access without recording. An enabled switch in System Settings can belong to an earlier build. [How macOS recognizes an app across updates](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 
 #### First recording and missing permissions
 
