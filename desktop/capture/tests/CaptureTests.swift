@@ -61,13 +61,123 @@ private func checkConverter() throws {
         }
         let converter = MonoConverter()
         var frames = 0
-        for _ in 0..<100 {
-            let mono = try converter.samples(packet)
-            try check(!mono.isEmpty && abs((mono.last ?? 0) - 0.25) < 0.05, "converted microphone level")
-            frames += mono.count
+        var valid = true
+        for i in 0..<100 {
+            try converter.append(packet, at: Double(i) / 50) { mono, time in
+                valid = valid && abs(time * Double(Timeline.rate) - Double(frames)) < 0.001
+                    && abs((mono.last ?? 0) - 0.25) < 0.05
+                frames += mono.count
+            }
         }
-        try check(abs(frames - 2 * Timeline.rate) < 128, "resampled duration at \(rate) Hz")
+        try converter.finish { mono, _ in frames += mono.count }
+        try check(valid, "level and packet continuity at \(rate) Hz")
+        try check(abs(frames - 2 * Timeline.rate) <= 1, "resampled duration at \(rate) Hz")
     }
+}
+
+// Actual mic taps can deliver 100 ms despite the requested 1024-frame tap size.
+private func checkMicContinuity() throws {
+    let rate = Timeline.rate, packetSize = rate / 10
+    let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1)!
+    let packet = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(packetSize))!
+    packet.frameLength = packet.frameCapacity
+    let converter = MonoConverter()
+    var timeline = Timeline(mode: .mic)
+    var expected = [Int16]()
+    func collect(_ samples: [Float], _ time: Double) {
+        timeline.add(samples, at: Int((time * Double(rate)).rounded()), from: .mic)
+    }
+    for i in 0..<441 {
+        for j in 0..<packetSize {
+            let phase = Double(i * packetSize + j) * 2 * Double.pi * 220 / Double(rate)
+            let sample = Float(0.21 + 0.05 * sin(phase))
+            packet.floatChannelData![0][j] = sample
+            expected.append(Int16((sample * 32767).rounded()))
+        }
+        try converter.append(packet, at: Double(i) / 10, emit: collect)
+    }
+    try converter.finish(emit: collect)
+    let output = timeline.render(through: expected.count)
+    let errors = zip(output, expected).filter { abs(Int($0) - Int($1)) > 1 }.count
+    try check(errors == 0, "100 ms mic packets have \(errors) incorrect samples, including the final packet")
+    print("44.1 s mic tone: all \(output.count) samples match the reference.")
+}
+
+private func checkInputGap() throws {
+    let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+    let packet = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800)!
+    packet.frameLength = 4800
+    let converter = MonoConverter()
+    var timeline = Timeline(mode: .mic)
+    func collect(_ samples: [Float], _ time: Double) {
+        timeline.add(samples, at: Int((time * 48000).rounded()), from: .mic)
+    }
+    packet.floatChannelData![0].initialize(repeating: 0.25, count: 4800)
+    try converter.append(packet, at: 0, emit: collect)
+    packet.floatChannelData![0].initialize(repeating: -0.25, count: 4800)
+    try converter.append(packet, at: 0.15, emit: collect)
+    try converter.finish(emit: collect)
+    let output = timeline.render(through: 12000)
+    try check(output[..<4800].allSatisfy { $0 == 8192 } &&
+              output[4800..<7200].allSatisfy { $0 == 0 } &&
+              output[7200...].allSatisfy { $0 == -8192 }, "preserve real input gap and both converter tails")
+}
+
+private func checkConvertedSync() throws {
+    let rate = Timeline.rate
+    let markers = [2.047, 65.057, 118.043]
+    var onsets = [Source: [Int]]()
+    var baseMix = Timeline(mode: .both)
+    for source in [Source.mic, .system] {
+        let mic = source == .mic
+        let hz = mic ? 44100 : 48000, size = mic ? 4410 : 512
+        let offset = mic ? 0.137 : 0.021, drift = mic ? 0.99986 : 1.00014
+        let channels = mic ? 1 : 2
+        let format = AVAudioFormat(standardFormatWithSampleRate: Double(hz), channels: UInt32(channels))!
+        let packet = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(size))!
+        packet.frameLength = packet.frameCapacity
+        let converter = MonoConverter()
+        var single = Timeline(mode: mic ? .mic : .system)
+        var edges = [Int]()
+        var high = false
+        func collect(_ samples: [Float], _ time: Double) {
+            let frame = Int((time * Double(rate)).rounded())
+            single.add(samples, at: frame, from: source)
+            baseMix.add(samples, at: frame, from: source)
+            let start = single.cursor
+            for (i, sample) in single.render(through: frame - rate / 4).enumerated() {
+                if !high && sample > 8000 { edges.append(start + i) }
+                high = sample > 8000
+            }
+        }
+        // A shared 10 ms marker occurs at the same host time on independent clocks.
+        for block in 0..<Int(ceil(120 * Double(hz) / Double(size))) {
+            let t = offset + Double(block * size) * drift / Double(hz)
+            for c in 0..<channels { packet.floatChannelData![c].initialize(repeating: 0, count: size) }
+            for marker in markers where marker < t + Double(size) * drift / Double(hz) && marker + 0.01 > t {
+                let lo = max(0, Int(ceil((marker - t) * Double(hz) / drift)))
+                let hi = min(size, Int(ceil((marker + 0.01 - t) * Double(hz) / drift)))
+                if hi > lo {
+                    for c in 0..<channels { for j in lo..<hi { packet.floatChannelData![c][j] = 0.5 } }
+                }
+            }
+            try converter.append(packet, at: t, emit: collect)
+        }
+        try converter.finish(emit: collect)
+        try check(edges.count == markers.count, "all \(source) markers survive")
+        onsets[source] = edges
+    }
+    let mix = baseMix.render(through: 120 * rate)
+    var worst = 0
+    for (i, marker) in markers.enumerated() {
+        let mic = onsets[.mic]![i], system = onsets[.system]![i]
+        let target = Int((marker * Double(rate)).rounded())
+        worst = max(worst, abs(mic - system))
+        try check(abs(target - mic) < 48 && abs(target - system) < 48, "both markers within 1 ms of host time")
+        try check(mix[target + 240] > 15000, "mic and system markers overlap in the final mix")
+    }
+    try check(worst < 48, "mic/system offset under 1 ms")
+    print("120 s independently clocked inputs: maximum marker offset \(worst) frames at 48 kHz.")
 }
 
 private func checkFile(directory: URL, seconds: Int) throws {
@@ -122,6 +232,9 @@ private func checkFile(directory: URL, seconds: Int) throws {
         try checkMix()
         try checkClockDrift()
         try checkConverter()
+        try checkMicContinuity()
+        try checkInputGap()
+        try checkConvertedSync()
         try checkFile(directory: directory, seconds: CommandLine.arguments.contains("--long") ? 10800 : 3)
     }
 }

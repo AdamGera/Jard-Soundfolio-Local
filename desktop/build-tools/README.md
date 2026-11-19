@@ -8,7 +8,7 @@ Build the local disk image from the repository root.
 python3 desktop/build-tools/package.py --dmg
 ```
 
-The builder writes the app and drag-to-Applications DMG to `desktop/out/`. This default build is ad-hoc signed for local testing. For a notarized build, use your Developer ID Application identity and a Keychain profile previously configured with Apple's `notarytool`.
+The builder writes the app and drag-to-Applications DMG to `desktop/out/`. The build uses the configured Jard publisher identity when present. A fresh development checkout without that identity produces an ad-hoc local build. For a notarized build, use your Developer ID Application identity and a Keychain profile previously configured with Apple's `notarytool`.
 
 ```sh
 python3 desktop/build-tools/package.py --dmg \
@@ -23,6 +23,23 @@ For an isolated test, set `RUMBLE_DATA_DIR` to a fresh private temporary directo
 Model provenance and SHA-256 digests live in `models.json`. The release notes identify ad-hoc builds. For a Developer ID release, verify notarization and stapling and test the downloaded DMG on a separate clean Apple Silicon Mac.
 
 To run the packaged smoke test, pass the built app path to `desktop/build-tools/smoke-package.py`. Add `--models /path/to/model` to exercise real local inference, word timing, speaker labels, and playback. The test creates a temporary copy of the verified weights, runs the bundle using the system PATH, and removes its own library on exit.
+
+## Signing successive builds with the same publisher certificate
+
+For builds distributed without an Apple Developer ID, the packager accepts a publisher-owned code-signing certificate. Use the same certificate and private key for each version, including local installs intended to replace the public app. The certificate identifies the app and its recorder across builds. The separate Ed25519 update key authenticates the GitHub feed.
+
+Install the upstream [rcodesign 0.29.0](https://github.com/indygreg/apple-platform-rs/releases/tag/apple-codesign%2F0.29.0) executable on the build machine. The builder also looks in `~/.local/bin/` for the pinned tool. Store the PEM-encoded code-signing certificate as `certificate.pem` and its private key as `private-key.pem` in a private directory outside the checkout. Restrict the private key to its owner and keep a secure backup of both files. Losing or regenerating the certificate changes the app’s identity. Users receive the signed app in the usual DMG or update ZIP.
+
+```sh
+python3 desktop/build-tools/package.py --dmg \
+  --publisher-identity "$HOME/.config/jard/soundfolio-local/macos-publisher" \
+  --update-key "$HOME/.config/jard/soundfolio-local/native-update.key" \
+  --notes "Describe what changed in this version."
+```
+
+The maintainer’s default identity directory is `~/.config/jard/soundfolio-local/macos-publisher/`. An update built with this signing mode must match `desktop/build-tools/jard-publisher.crt`. Restore the original identity from backup when moving the build to another Mac. Forks using their own updater should pin their own public certificate.
+
+The packager verifies the app’s signature and checks the signer of both the foreground app and the capture helper. Moving from an ad-hoc release can require a fresh grant. Gatekeeper’s first-launch policy still applies. [Apple’s explanation of app identity](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 
 ## Publishing in-app updates
 

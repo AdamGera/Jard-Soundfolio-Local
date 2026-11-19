@@ -24,7 +24,7 @@ Use **File → Open in Browser** to open the same workspace alongside the Mac wi
 
 #### Updating the Mac app
 
-The current release is **v0.0.4**. If your copy shows a higher version number, install this DMG once to switch to the corrected version sequence. Your recordings and downloaded models are stored separately from the application. In v0.0.4, choose **Jard Soundfolio Local → Check for Updates…** to check GitHub. The app also checks when it opens. Turn off **Check for Updates on Launch** in the same menu for manual checks only. These requests send no recordings, transcripts, or notes.
+The current release is **v0.0.5**. From v0.0.4, choose **Jard Soundfolio Local → Check for Updates…**, then **Install Update**. If your copy shows a higher preview version, install the DMG once to switch to the corrected version sequence. Your recordings and downloaded models are stored separately from the application. The app also checks when it opens. Turn off **Check for Updates on Launch** in the same menu for manual checks only. These requests send no recordings, transcripts, or notes.
 
 When a newer version is available, finish any recording and choose **Install Update**, or choose **Later**. The app verifies Jard’s release signature and the downloaded archive before replacing itself and reopening. Install it in a writable Applications folder first.
 

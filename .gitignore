@@ -74,3 +74,5 @@ sessions.sql.*
 
 # Private Ed25519 update signing seed
 native-update.key
+# Private macOS publisher key
+private-key.pem

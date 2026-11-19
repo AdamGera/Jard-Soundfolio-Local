@@ -3,7 +3,7 @@
   "name": "jard-soundfolio-local",
   "display_name": "Jard Soundfolio Local",
   "description": "Your recordings, transcripts, and notes stay on your Mac.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "platforms": [
     "macos"
   ],

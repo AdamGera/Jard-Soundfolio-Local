@@ -29,13 +29,28 @@ struct Timeline {
 
     mutating func add(_ samples: [Float], at frame: Int, from source: Source) {
         guard !samples.isEmpty, frame < Self.limit else { return }
-        // Round-off at callback boundaries must not insert a one-sample hole or double a sample.
-        let previous = lastEnd[source]
-        let start = previous.map { abs(frame - $0) <= 2 ? $0 : frame } ?? frame
-        lastEnd[source] = start + samples.count
-        lateFrames += max(0, min(samples.count, cursor - max(0, start)))
-        if start + samples.count > cursor {
-            blocks.append(Block(start: start, samples: samples))
+        var start = frame
+        var aligned = samples
+        if let previous = lastEnd[source] {
+            let delta = frame - previous
+            // Small differences between the device and host clocks accumulate.
+            // Spread the correction through this packet to keep its edges continuous.
+            if delta != 0, abs(delta) <= min(Self.rate / 1000, samples.count / 16) {
+                start = previous
+                let count = samples.count + delta
+                let scale = Double(samples.count - 1) / Double(count - 1)
+                aligned = (0..<count).map { i in
+                    let position = Double(i) * scale
+                    let left = min(Int(position), samples.count - 1)
+                    let right = min(left + 1, samples.count - 1)
+                    return samples[left] + Float(position - Double(left)) * (samples[right] - samples[left])
+                }
+            }
+        }
+        lastEnd[source] = start + aligned.count
+        lateFrames += max(0, min(aligned.count, cursor - max(0, start)))
+        if start + aligned.count > cursor {
+            blocks.append(Block(start: start, samples: aligned))
         }
     }
 

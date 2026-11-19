@@ -116,6 +116,76 @@ class InsightsTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 validate({**summary, "anchor1": {**summary["anchor1"], field: value}})
 
+    async def test_mixed_language_overview_streams_and_checkpoints_raw_writer(self):
+        import note_stream
+        from insights import SUMMARY
+
+        lines = [
+            "Before the museum opens we need to review the exhibition catalogue, קטלוג התערוכה, for duplicate exhibits.",
+            "Each archive record includes שימור מסמכים so the curator can find the original paper.",
+            "Don't archive the field notebooks. We still need the originals.",
+            "The field notebooks should be archived once the scans are verified.",
+            "At the reception desk the visitors will see the printed visitor guide, מדריך מבקרים, beside the map.",
+            "The furniture team needs to double check the gallery lighting, תאורת הגלריה, before the installation.",
+            "If the venue is free, we could hold the workshop for two days.",
+            "The venue is free. Yes, let's book the workshop.",
+            "On the final evening we will return the loaned pieces listed in נוהל החזרת מוצגים to their owners.",
+        ]
+        source = self.store.audio.parent / "museum.wav"
+        source.write_bytes(b"fixture")
+        key, _ = self.store.create(source, "Museum workshop", "audio/wav", {"recording": False, "diarization": False}, 90)
+        for i, line in enumerate(lines, 1):
+            self.store.append(key, {"text": line, "language": "English", "words": [], "segments": []}, i * 10)
+        self.store.finish(key)
+        with self.store.connection() as db:
+            rows = passages(db, key)
+            expected = note_identity(db, key)
+        instruction = "Organize the meeting around the museum teams and the curator's response."
+        generated = {}
+
+        def respond(task, data, schema, limit, **kwargs):
+            fields = schema["properties"]
+            self.assertEqual(data, excerpts(rows))
+            self.assertTrue(kwargs["full_context"])
+            if "writerPrompt" in fields:
+                return {f: instruction if f == "writerPrompt" else spec["enum"][0] for f, spec in fields.items()}
+            guide = kwargs["context"]["editorialGuide"]
+            self.assertEqual(guide["writerPrompt"], instruction)
+            self.assertGreaterEqual(len(guide["sourceTerms"]), 3)
+            self.assertEqual(len(guide["topics"]), len(guide["sourceTerms"]))
+            for f, spec in fields.items():
+                if f.startswith("anchor"):
+                    props = spec["properties"]
+                    generated[f] = {"evidence": props["evidence"]["enum"][0], "detail": props["detail"]["enum"][0],
+                                    "heading": "Museum collection " + f[-1]}
+                else:
+                    generated[f] = spec["enum"][0]
+                kwargs["on_partial"](dict(generated))
+            check_structure(generated, schema)
+            kwargs["validate"](generated)
+            return generated
+
+        self.insights.model.structured.side_effect = respond
+        with patch("insights.note_stream.patch", wraps=note_stream.patch) as preview:
+            note = await self.insights.write_overview(key, rows, "English", expected)
+
+        self.assertEqual(self.insights.model.structured.await_count, 2)
+        self.assertIn("Don't archive the field notebooks", note["markdown"])
+        self.assertIn("once the scans are verified", note["markdown"])
+        self.assertIn("If the venue is free", note["markdown"])
+        self.assertIn("Yes, let's book the workshop", note["markdown"])
+        drafts = [c.kwargs for c in preview.call_args_list if "markdown" in c.kwargs]
+        self.assertEqual(drafts[-1], note)
+        self.assertIn("once the scans are verified", drafts[-2]["markdown"])
+        self.assertIn("Yes, let's book the workshop", drafts[-2]["markdown"])
+        self.assertLess(len(drafts[0]["markdown"]), len(note["markdown"]))
+        with self.store.connection() as db:
+            checkpoint = json.loads(db.execute(
+                "SELECT data FROM window_notes WHERE id=? AND part=?", (key, SUMMARY)
+            ).fetchone()[0])
+        self.assertEqual(checkpoint["rawWriter"], generated)
+        self.assertEqual(checkpoint["markdown"], note["markdown"])
+
     async def test_short_suggestion_keeps_qualifier_in_writer_context_and_uses_only_a_lead(self):
         rows = [{"id": 1, "start": 0, "text": "Speaker A: Maybe Wednesday, if the venue is free."},
                 {"id": 2, "start": 2, "text": "Speaker B: Let's check first."}]

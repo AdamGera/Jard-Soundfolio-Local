@@ -17,6 +17,8 @@ import chat_context
 import local_qwen
 import note_stream
 import session_notes
+import overview_exchanges
+import place_hints
 import title_words
 import writing_cache
 from local_qwen import LocalQwen, source_messages
@@ -25,7 +27,8 @@ from session_notes import LANGUAGES, passages, publish
 # Invalidate complete artifacts and in-flight checkpoints when their implementation changes.
 # Individual successful model requests use exact request-based keys in LocalQwen.structured.
 PIPELINE_REVISION = hashlib.sha256(
-    Path(__file__).read_bytes() + Path(local_qwen.__file__).read_bytes() + Path(title_words.__file__).read_bytes() +
+    Path(__file__).read_bytes() + Path(overview_exchanges.__file__).read_bytes() + Path(place_hints.__file__).read_bytes() +
+    Path(__file__).with_name("place_names.json").read_bytes() + Path(local_qwen.__file__).read_bytes() + Path(title_words.__file__).read_bytes() +
     json.dumps(LANGUAGES, sort_keys=True).encode() + session_notes.SOURCE_FORMAT_REVISION.encode() + local_qwen.MODEL_SHA.encode() + local_qwen.BIN_SHA.encode()
 ).hexdigest()
 
@@ -203,7 +206,9 @@ def validate_checkpoint(part, value):
     elif part == SUMMARY:
         markdown_summary(value)
     elif part == GUIDE:
-        local_qwen.check_structure(value, GUIDE_SCHEMA)
+        schema = (obj(topics=array(INTEGER, 8), sourceTerms=array(STRING, 8), writerPrompt=STRING)
+                  if "sourceTerms" in value else GUIDE_SCHEMA)
+        local_qwen.check_structure(value, schema)
     elif part == CHAPTERS:
         if not value or sorted({t["id"] for t in value}) != [t["id"] for t in value]:
             raise ValueError("Invalid chapter order.")
@@ -528,13 +533,23 @@ class Insights:
             base_language = db.execute("SELECT base FROM notes WHERE id=?", (key,)).fetchone()[0]
         short = len(transcript) <= 600 and len(transcript.split()) <= 85
         count = min(len(rows), 1 if short else min(6, 2 + int(rows[-1]["start"] // 180)))
-        fields = [f"anchor{i + 1}" for i in range(count)]
-        index = overview_index(rows) if not short else rows
-        count = min(count, len(index))
-        fields = fields[:count]
-        options = {f: index[len(index) * i // count:len(index) * (i + 1) // count]
-                   for i, f in enumerate(fields)}
+        positions = {row["id"]: i for i, row in enumerate(rows)}
+        terms = overview_exchanges.phrase_options(rows) if not short else []
+        if terms:
+            groups = [[rows[positions[source]] for _, source in group] for group in terms]
+        else:
+            index = rows if short else overview_index(rows)
+            count = min(count, len(index))
+            groups = [index[len(index)*i//count:len(index)*(i+1)//count] for i in range(count)]
+        fields = [f"anchor{i+1}" for i in range(len(groups))]
+        options = dict(zip(fields, groups, strict=True))
         anchor_schema = {f: {"type": "integer", "enum": [r["id"] for r in group]} for f, group in options.items()}
+        if terms:
+            anchor_schema = {f: {"type": "string", "enum": [phrase for phrase, _ in group]}
+                             for f, group in zip(fields, terms, strict=True)}
+        exchanges = {} if short else {
+            f"exchange{i}": item for i, item in enumerate(overview_exchanges.find_exchanges(rows), 1)
+        }
         sampling = {"temperature": .7, "top_p": .85, "top_k": 20, "min_p": 0., "presence_penalty": 1.4}
 
         async def plan():
@@ -544,22 +559,55 @@ class Insights:
                 "about how to arrange the note. Leave interpretations and conclusions out of the guide. "
                 "Cover changes of subject in the "
                 "opening, middle and close. Speaker shares measure speaking time, including overlapping "
-                "voices. A brief interjection can matter. Use the passage numbers in each interval.",
+                "voices. A brief interjection can matter. " +
+                ("Choose the most informative original topic phrase in each interval; prefer concrete activities "
+                 "and substantive terms to conversational filler." if terms else "Use the passage numbers in each interval."),
                 transcript, obj(**anchor_schema, writerPrompt=STRING), 650, sampling=sampling,
-                context={"speakerAnalytics": analytics, "passageOptions": {f: excerpts(group) for f, group in options.items()}},
+                context={"speakerAnalytics": analytics, "markedExchanges": exchanges, "passageOptions": {f: excerpts(group) for f, group in options.items()}},
                 policy=policy, full_context=True)
-            return {"topics": [result[f] for f in fields], "writerPrompt": result["writerPrompt"]}
+            anchors = ([dict(group)[result[f]] for f, group in zip(fields, terms, strict=True)]
+                       if terms else [result[f] for f in fields])
+            guide_data = {"topics": anchors, "writerPrompt": result["writerPrompt"]}
+            if terms:
+                guide_data["sourceTerms"] = [result[f] for f in fields]
+            return guide_data
 
         guide = await self.checkpoint(key, GUIDE, plan, expected) if checkpoint_stages else await plan()
 
-        # An exact quotation identifies the original passage even while the draft is streaming.
-        proofs = {field: {evidence_phrase(row): row for row in reversed(group)}
-                  for field, group in options.items()}
+        # The writer cites the exchange the planner actually read. A nearby reply may
+        # qualify its meaning, so include it verbatim alongside the selected passage.
+        sources = {}
+        proofs = {}
+        for field, anchor in zip(fields, guide["topics"], strict=True):
+            i = positions[anchor]
+            sources[field] = rows[max(0, i - 1):i + 3]
+            proofs[field] = {evidence_phrase(rows[i]): rows[i]}
+        if terms:
+            for field, term, anchor in zip(fields, guide["sourceTerms"], guide["topics"], strict=True):
+                proofs[field] = {term: rows[positions[anchor]]}
 
         def render(value):
+            if terms:
+                labels = [value.get(f, {}).get("heading", "").strip(" .،") for f in fields]
+                labels = list(dict.fromkeys(label for label in labels if label))
+                lead = overview_exchanges.topic_sentence(labels, locale)
+                entries = []
+                for f, anchor in zip(fields, guide["topics"], strict=True):
+                    quote = value.get(f, {}).get("detail", "").strip()
+                    if quote:
+                        start = rows[positions[anchor]]["start"]
+                        heading = value[f].get("heading", "").strip()
+                        entries.append((start, f"- **{heading}** · «{quote}» ⟦{start:g}⟧"))
+                for f, item in exchanges.items():
+                    if value.get(f):
+                        entries.append((item["start"], f"- {value[f]} ⟦{item['start']:g}⟧"))
+                return {"lead": lead, "markdown": "\n\n".join(line for _, line in sorted(entries))}
             if short:
                 return {"lead": value.get("lead", ""), "markdown": ""}
             sections = []
+            for field, item in exchanges.items():
+                if value.get(field):
+                    sections.append(f"- {value[field].strip()} ⟦{item['start']:g}⟧")
             for field in fields:
                 item = value.get(field) or {}
                 if item.get("heading"):
@@ -574,6 +622,12 @@ class Insights:
             rendered = render(value)
             validate_language([rendered["lead"]], locale)
             if short:
+                return
+            if terms:
+                labels = [clean(value[f]["heading"]) for f in fields]
+                validate_language(labels, locale)
+                if len(set(labels)) != len(labels):
+                    raise ValueError("Give each distinct topic its own short translation.")
                 return
             bodies = [value[f]["detail"] for f in fields]
             validate_language(bodies + [value[f]["heading"] for f in fields], locale)
@@ -605,44 +659,55 @@ class Insights:
                 raise ValueError("Use a distinct concrete heading for each subject.")
 
         async def draft():
-            # Preserve surrounding replies AND the breadth of the reading index. The planner's
-            # preferred anchor alone can miss a change of subject inside a long interval.
-            evidence = {}
-            for field, anchor in zip(fields, guide["topics"], strict=True):
-                selected = {r["id"] for r in options[field]}
-                selected.update(range(anchor - 2, anchor + 3))
-                evidence[field] = excerpts([r for r in rows if r["id"] in selected])
+            evidence = {field: excerpts(group) for field, group in sources.items()}
             # Read the original words immediately before composing each section.
             # The evidence is part of the model output and must exist in that time range.
             sections = {field: obj(evidence={"type": "string", "enum": list(group)},
                                    heading=STRING, detail=STRING) for field, group in proofs.items()}
-            schema = obj(lead=STRING) if short else obj(lead=STRING, **sections)
+            readings = {field: {"type": "string", "enum": overview_exchanges.wording(item, locale)}
+                        for field, item in exchanges.items()}
+            if terms:
+                for f, anchor in zip(fields, guide["topics"], strict=True):
+                    original = evidence_phrase(rows[positions[anchor]])
+                    sections[f] = obj(evidence=sections[f]["properties"]["evidence"], heading=STRING,
+                                      detail={"type": "string", "enum": [original]})
+                schema = obj(**sections, **readings)
+            else:
+                schema = obj(lead=STRING) if short else obj(lead=STRING, **sections, **readings)
             task = ("Answer in one sentence, preserving the final response." if short else
-                    "Write a useful meeting overview. Start with a short lead that captures how the whole "
-                    "conversation developed. For each interval give a concrete topic heading and one or two "
-                    "complete sentences. Cover a different substantive aspect in each section. Name the actual "
-                    "activities and ideas discussed. In the lead name the major subjects in plain language. "
-                    "Leave out biographies, diagnoses, metaphors and interpretations of unclear remarks. "
-                    "Select evidence with a clear identifiable subject, then summarize it without adding "
-                    "names, explanations or consequences. Leave an outcome open when the passage "
-                    "contains a question or proposal. Describe what "
-                    "that speaker said and any qualification in the surrounding replies. Treat the guide "
-                    "only as advice on structure. Omit any interpretation you cannot support. "
-                    "When a subject spans intervals, describe a new detail or differing view.")
+                    "Write a compact thematic overview. Name the recurring activities or subjects in the lead. "
+                    "For each field refer only to that field's original exchange; give a short heading and "
+                    "one plain factual sentence. Preserve recognizable original terms. With unclear speech "
+                    "stay at topic level. Never infer a biography, claim, cause or conclusion from a sound-alike.")
 
             def preview(value):
                 note = render(value)
                 note_stream.patch(summary=note["lead"], markdown=note["markdown"])
 
             instruction = (guide["writerPrompt"] + "\n\n" + task + f" Write the entire overview in {language}. "
-                           "Where someone is exploring partners or considering a future action, report that "
-                           "as a possibility until another speaker explicitly confirms it. Do not invent "
-                           "personal identities, reasons, diagnoses, figures or final agreements.")
+                           "Report suggestions as possibilities until explicitly confirmed. Preserve contrasting "
+                           "replies. Do not infer personal identities, reasons, diagnoses or outcomes.")
+            if terms:
+                instruction = (f"Translate each ORIGINAL phrase into idiomatic {language}. "
+                               "Write only its equivalent noun phrase for heading. Use a natural translation of "
+                               "the entire expression rather than a sound-alike word. Keep technical terms "
+                               "distinct. Copy the source passage in detail. Preserve qualifiers in the marked exchanges.")
+            if exchanges:
+                instruction += ("\nThe marked exchanges are separate, source-backed notes. Choose a concise "
+                                "reading for each. The lead and other sections cover the rest of the recording. "
+                                "Do not extrapolate from or repeat the marked exchanges in those sections.")
+
+            material = ({"selectedTopics": [list(proofs[field]) for field in fields], "editorialGuide": guide}
+                        if terms else {"speakerAnalytics": analytics, "topicEvidence": evidence, "markedExchanges": exchanges})
             result = await self.model.structured(
-                instruction, transcript, schema, 220 if short else 2800, sampling=sampling,
-                context={"speakerAnalytics": analytics, "topicEvidence": evidence},
+                instruction, transcript, schema, 220 if short else 2800,
+                sampling=({**sampling, "temperature": .15, "presence_penalty": 0.0} if terms else sampling),
+                context=material,
                 policy=policy, full_context=True, validate=check_note, on_partial=preview)
             note = render(result)
+            # Keep the exact final model object with the existing session checkpoint.
+            # This lets a regeneration be audited independently of Markdown rendering.
+            note["rawWriter"] = result
             if short and note["lead"].endswith(("?", "؟", "？")):
                 utterances = [re.sub(r"^Speaker [A-Z]:\s*", "", r["text"]).strip() for r in rows]
                 for i, line in enumerate(utterances[:-1]):

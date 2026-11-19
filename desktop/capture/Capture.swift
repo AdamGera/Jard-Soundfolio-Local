@@ -57,21 +57,66 @@ final class MonoConverter {
     private var converter: AVAudioConverter?
     private let mono = AVAudioFormat(standardFormatWithSampleRate: Double(Timeline.rate), channels: 1)!
 
-    func samples(_ input: AVAudioPCMBuffer) throws -> [Float] {
-        guard input.frameLength > 0 else { return [] }
-        if converter?.inputFormat != input.format {
+    // AVAudioConverter can hold part of a packet and emit it on a later call.
+    // Track that audio in output frames so its timestamp travels with the samples.
+    private let lock = NSLock()
+    private var closed = false
+    private var bufferedFrames = 0.0
+    private var inputEnd: Double?
+
+    func append(_ input: AVAudioPCMBuffer, at timestamp: Double,
+                emit: ([Float], Double) -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return }
+        guard timestamp.isFinite else { throw CaptureError("Audio input lost its timing reference.") }
+        guard input.frameLength > 0 else { return }
+        let rate = input.format.sampleRate
+        guard rate > 0 else { throw CaptureError("Unsupported audio input format.") }
+        if converter?.inputFormat != input.format ||
+            inputEnd.map({ abs(timestamp - $0) > 0.002 }) == true {
+            try drain(emit: emit)
             converter = AVAudioConverter(from: input.format, to: mono)
             converter?.downmix = true
             converter?.primeMethod = .none
         }
-        guard let converter, input.format.sampleRate > 0 else { throw CaptureError("Unsupported audio input format.") }
-        let capacity = AVAudioFrameCount(ceil(Double(input.frameLength) * mono.sampleRate / input.format.sampleRate)) + 32
-        guard let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: capacity) else {
-            throw CaptureError("Could not allocate an audio conversion buffer.")
+        let duration = Double(input.frameLength) / rate
+        let start = timestamp - bufferedFrames / mono.sampleRate
+        let frames = duration * mono.sampleRate
+        let output = try convert(input, capacity: Int(ceil(frames)) + 32)
+        bufferedFrames += frames - Double(output.count)
+        inputEnd = timestamp + duration
+        if !output.isEmpty { emit(output, start) }
+    }
+
+    func finish(emit: ([Float], Double) -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        closed = true
+        try drain(emit: emit)
+    }
+
+    private func drain(emit: ([Float], Double) -> Void) throws {
+        defer { converter = nil; inputEnd = nil; bufferedFrames = 0 }
+        guard let inputEnd else { return }
+        while bufferedFrames.rounded() > 0 {
+            let start = inputEnd - bufferedFrames / mono.sampleRate
+            let output = try convert(nil, capacity: Int(bufferedFrames.rounded()))
+            if output.isEmpty { break }
+            emit(output, start)
+            bufferedFrames -= Double(output.count)
+        }
+    }
+
+    private func convert(_ input: AVAudioPCMBuffer?, capacity: Int) throws -> [Float] {
+        guard let converter,
+              let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: AVAudioFrameCount(capacity)) else {
+            throw CaptureError("Could not initialize audio conversion.")
         }
         var provided = false
         var error: NSError?
         let status = converter.convert(to: out, error: &error) { _, state in
+            guard let input else { state.pointee = .endOfStream; return nil }
             if provided { state.pointee = .noDataNow; return nil }
             provided = true
             state.pointee = .haveData
@@ -92,6 +137,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private let systemConverter = MonoConverter()
     private let stopReason: AsyncStream<String>.Continuation
     private var input: InputDevice
+    private var micConverter: MonoConverter?
     private var engine: AVAudioEngine?
     private var systemStream: SCStream?
     private var observer: NSObjectProtocol?
@@ -103,6 +149,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var timer: DispatchSourceTimer?
     // Only the mix queue accesses the fields below.
     private var sink: WaveSink?
+    private var drainError: String?
     private var timeline: Timeline
     private var epoch = 0.0
     private var accepting = false
@@ -164,9 +211,10 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             do {
                 let timestamp = time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime)
                     : hostSeconds() - Double(buffer.frameLength) / buffer.format.sampleRate
-                self.enqueue(try converter.samples(buffer), at: timestamp, from: .mic)
+                try converter.append(buffer, at: timestamp) { self.enqueue($0, at: $1, from: .mic) }
             } catch { self.stopReason.yield(error.localizedDescription) }
         }
+        micConverter = converter
         engine = instance
         instance.prepare()
         try instance.start()
@@ -185,7 +233,18 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        finishConverter(micConverter, from: .mic)
+        micConverter = nil
         self.engine = nil
+    }
+
+    private func finishConverter(_ converter: MonoConverter?, from source: Source) {
+        do { try converter?.finish { enqueue($0, at: $1, from: source) } }
+        catch {
+            let message = error.localizedDescription
+            queue.async { self.drainError = message }
+            stopReason.yield(message)
+        }
     }
 
     private func requestMicRestart(generation expected: Int? = nil, stalled: Bool = false) {
@@ -246,14 +305,15 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
                   let format = AVAudioFormat(streamDescription: asbd) else {
                 throw CaptureError("Mac audio returned an unknown audio format.")
             }
-            let samples = try sample.withAudioBufferList { buffers, _ -> [Float] in
+            try sample.withAudioBufferList { buffers, _ in
                 guard let pcm = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: buffers.unsafePointer) else {
                     throw CaptureError("Could not read Mac audio samples.")
                 }
                 pcm.frameLength = AVAudioFrameCount(sample.numSamples)
-                return try systemConverter.samples(pcm)
+                try systemConverter.append(pcm, at: sample.presentationTimeStamp.seconds) {
+                    enqueue($0, at: $1, from: .system)
+                }
             }
-            enqueue(samples, at: sample.presentationTimeStamp.seconds, from: .system)
         } catch { stopReason.yield(error.localizedDescription) }
     }
 
@@ -322,14 +382,14 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let systemStream {
             try? await systemStream.stopCapture()
-            systemQueue.sync {}
+            systemQueue.sync { finishConverter(systemConverter, from: .system) }
         }
         try queue.sync {
             guard accepting, let sink else { return }
             accepting = false
             // A suspend/clock jump must not expand a truncated take into hours of silence.
             let end = min(Int(((stopped - epoch) * Double(Timeline.rate)).rounded()), timeline.cursor + 3 * Timeline.rate)
-            var finalReason = reason
+            var finalReason = drainError ?? reason
             do { try flush(to: end) }
             catch { finalReason = "Recording stopped after a storage error. " + error.localizedDescription }
             try sink.finish()
