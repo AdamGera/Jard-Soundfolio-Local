@@ -1,0 +1,266 @@
+"""Session-local routes for overview variants and text-only transcript conversations."""
+
+import asyncio
+import json
+import logging
+import re
+import time
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from session_notes import LANGUAGES, initialize, selection
+import chat_context
+import writing_cache
+from session_store import MissingSession
+
+router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
+
+
+class OverviewChoice(BaseModel):
+    language: str = Field(max_length=32)
+    retry: bool = False
+    regenerate: bool = False
+
+
+class ChatQuestion(BaseModel):
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    question: str = Field(min_length=1, max_length=4000)
+
+
+def check_origin(request):
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(403, "Open Jard Audio from its local launcher.")
+
+
+def session_status(db, key):
+    row = db.execute("SELECT status,length(search_text) AS size FROM sessions WHERE id=?", (key,)).fetchone()
+    if not row:
+        raise MissingSession(key)
+    return row
+
+
+@router.get("/api/overview-languages")
+def overview_languages():
+    return LANGUAGES
+
+
+def overview_response(request, key, choice=None):
+    with request.app.state.library.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        session_status(db, key)
+        value = selection(db, key, choice.language if choice else None, choice.retry if choice else False,
+                          regenerate=bool(choice and choice.regenerate))
+    if value is None:
+        raise HTTPException(409, "The overview is available after transcription finishes.")
+    if value["status"] == "queued":
+        request.app.state.insights.wake.set()
+    return JSONResponse(value, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/sessions/{key}/overview")
+async def get_overview(key: UUID, request: Request):
+    return overview_response(request, str(key))
+
+
+@router.get("/api/sessions/{key}/overview/stream")
+async def overview_stream(key: UUID, language: str, request: Request):
+    key = str(key)
+    library = request.app.state.library
+    if language != "und" and language not in LANGUAGES:
+        raise HTTPException(400, "Choose a supported overview language.")
+    with library.connection() as db:
+        session_status(db, key)
+
+    def queued():
+        with library.connection() as db:
+            return db.execute(
+                "SELECT 1 FROM overviews WHERE id=? AND lang=? AND status='queued'", (key, language)
+            ).fetchone() is not None
+
+    async def events():
+        with request.app.state.insights.previews.watch(key, language) as channel:
+            yield ": connected\n\n"
+            while True:
+                changed = channel.changed
+                if channel.draft is None and not queued():
+                    yield "event: end\ndata: {}\n\n"
+                    return
+                if channel.draft is not None:
+                    payload = json.dumps(channel.draft, ensure_ascii=False, separators=(",", ":"))
+                    yield f"event: draft\ndata: {payload}\n\n"
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=5)
+                except TimeoutError:
+                    if not queued():
+                        yield "event: end\ndata: {}\n\n"
+                        return
+                    yield ": waiting\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@router.post("/api/sessions/{key}/overview")
+async def choose_overview(key: UUID, choice: OverviewChoice, request: Request):
+    check_origin(request)
+    if choice.language != "auto" and choice.language not in LANGUAGES:
+        raise HTTPException(400, "Choose a supported overview language.")
+    return overview_response(request, str(key), choice)
+
+
+@router.get("/api/sessions/{key}/chat")
+def chat_history(key: UUID, request: Request):
+    with request.app.state.library.connection() as db:
+        session_status(db, str(key))
+        rows = db.execute(
+            """SELECT t.*,n.source_digest AS current_source FROM chat_turns t LEFT JOIN notes n ON n.id=t.id
+               WHERE t.id=? ORDER BY t.rowid""",
+            (str(key),),
+        ).fetchall()
+    messages = []
+    for row in rows:
+        answer = row["answer"]
+        if row["source_digest"] and row["current_source"] != row["source_digest"]:
+            # Historical dialogue stays readable after re-transcription; its old seek targets no longer apply.
+            answer = re.sub(r" *⟦\d+(?:\.\d+)?⟧", "", answer)
+        messages.append(
+            {"id": row["message_id"], "role": "user", "parts": [{"type": "text", "text": row["question"]}]}
+        )
+        messages.append(
+            {
+                "id": "answer-" + row["message_id"],
+                "role": "assistant",
+                "metadata": {"status": row["status"], **({"error": row["error"]} if row["error"] else {})},
+                "parts": [{"type": "text", "text": answer}],
+            }
+        )
+    return JSONResponse(messages, headers={"Cache-Control": "no-store"})
+
+
+def completed_answer(db, signature):
+    return db.execute(
+        """SELECT answer FROM chat_turns WHERE request_digest=? AND status='complete'
+           ORDER BY rowid LIMIT 1""",
+        (signature,),
+    ).fetchone()
+
+
+@router.post("/api/sessions/{key}/chat")
+async def ask_chat(key: UUID, body: ChatQuestion, request: Request):
+    check_origin(request)
+    key = str(key)
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(400, "Enter a question.")
+    store = request.app.state.library
+    insights = request.app.state.insights
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        session = session_status(db, key)
+        if session["status"] != "complete" or not session["size"]:
+            raise HTTPException(409, "Chat needs a completed transcript with speech.")
+        initialize(db, key)
+        context = chat_context.snapshot(db, key)
+        source = context["source"]
+        existing = db.execute(
+            "SELECT rowid,* FROM chat_turns WHERE id=? AND message_id=?", (key, body.id)
+        ).fetchone()
+        if existing and existing["question"] != question:
+            raise HTTPException(409, "This message ID already belongs to another question.")
+
+        if db.execute("SELECT 1 FROM chat_turns WHERE id=? AND status='streaming'", (key,)).fetchone():
+            raise HTTPException(409, "A reply is already in progress.")
+        # Retry an existing turn with precisely the conversation that preceded it.
+        before = existing["rowid"] if existing else 2**63 - 1
+        recent = db.execute(
+            """SELECT question,answer FROM chat_turns WHERE id=? AND rowid<?
+                    AND source_digest=? AND status IN ('complete','stopped')
+                    ORDER BY rowid DESC LIMIT 5""",
+            (key, before, source),
+        ).fetchall()
+        history = []
+        for row in reversed(recent):
+            history.extend(
+                [
+                    {"role": "user", "content": row["question"]},
+                    {"role": "assistant", "content": row["answer"]},
+                ]
+            )
+        from insights import STAGE_REVISIONS
+
+        signature = writing_cache.memo_key(
+            "chat-answer-v2", [STAGE_REVISIONS["chat"], source, context["fingerprint"], history, question]
+        )
+        cached = completed_answer(db, signature)
+        answer, status = (cached["answer"], "complete") if cached else ("", "streaming")
+        db.execute(
+            """INSERT INTO chat_turns(id,message_id,question,answer,status,source_digest,request_digest)
+                   VALUES(?,?,?,?,?,?,?) ON CONFLICT(id,message_id) DO UPDATE SET
+                   status=excluded.status,answer=excluded.answer,source_digest=excluded.source_digest,
+                   request_digest=excluded.request_digest,error=NULL""",
+            (key, body.id, question, answer, status, source, signature),
+        )
+    if cached:
+        return StreamingResponse(
+            iter([answer]), media_type="text/plain", headers={"Cache-Control": "no-store"}
+        )
+
+    def save(answer, status, reason=None):
+        with store.connection() as db:
+            return db.execute(
+                """UPDATE chat_turns SET answer=?,status=?,error=? WHERE id=? AND message_id=?
+                   AND request_digest=? AND status='streaming'""",
+                (answer, status, reason, key, body.id, signature),
+            ).rowcount
+
+    async def stream():
+        answer = ""
+        status = "stopped"
+        reason = None
+        last_save = time.monotonic()
+        try:
+            with writing_cache.scope(store, key, purpose="chat"):
+                async with insights.chat_priority():
+                    # A peer may have finished the same request while this stream waited for the model.
+                    with store.connection() as db:
+                        current = db.execute("SELECT source_digest FROM notes WHERE id=?", (key,)).fetchone()
+                        if not current or current["source_digest"] != source:
+                            return
+                        cached = completed_answer(db, signature)
+                    if cached:
+                        answer = cached["answer"]
+                        status = "complete"
+                        yield answer
+                        return
+                    async for token in insights.chat_tokens(key, question, history, context):
+                        answer += token
+                        if time.monotonic() - last_save > 0.4:
+                            if not save(answer, "streaming"):
+                                return
+                            last_save = time.monotonic()
+                        yield token
+                    status = "complete" if answer.strip() else "error"
+                    if status == "error":
+                        reason = "The local writing model returned an empty answer. Retry this message."
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            status = "error"
+            if isinstance(exc, RuntimeError) and str(exc).startswith(("Run Setup Jard Audio", "Local writing model")):
+                reason = str(exc)
+            elif isinstance(exc, ValueError) and str(exc).startswith("Please shorten the question"):
+                reason = str(exc)
+            else:
+                reason = "The local writing model could not finish this answer. Retry the message."
+            logger.warning("Local chat failed (%s)", type(exc).__name__)
+        finally:
+            save(answer, status, reason)
+
+    return StreamingResponse(
+        stream(), media_type="text/plain", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+    )

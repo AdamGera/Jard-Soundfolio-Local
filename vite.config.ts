@@ -5,6 +5,8 @@ import { defineConfig } from "vite"
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Older running servers use the same Finder launcher as this checkout’s welcome page.
+  define: { "import.meta.env.JARD_WELCOME_PAGE": JSON.stringify(resolve(import.meta.dirname, "README.html")) },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

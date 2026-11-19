@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>Welcome to Jard Audio</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f6f6f8; --surface: #fff; --text: #242329; --muted: #66656e;
+      --line: #dedde2; --tint: #ded8ef; --ink: #392f54; --button: #f4f3f7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --page: #18181d; --surface: #222228; --text: #f4f2f6; --muted: #b2afb9;
+        --line: #39383f; --tint: #cfc3eb; --ink: #30263e; --button: #302f38; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; }
+    main { width: min(100%, 660px); margin: auto; padding: clamp(24px, 5vw, 44px); }
+    .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.025em; }
+    .brand img { display: block; }
+    header { margin: 28px 0 25px; }
+    h1 { font: 400 clamp(33px, 6vw, 46px)/1.05 Georgia, serif; letter-spacing: -.05em; margin: 0 0 12px; }
+    p { margin: 0; color: var(--muted); }
+    .actions { background: var(--surface); border: 1px solid var(--line); border-radius: 19px; padding: 0 20px; }
+    article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 18px 0; }
+    article + article { border-top: 1px solid var(--line); }
+    h2 { font-size: 15px; letter-spacing: -.02em; margin: 0 0 3px; }
+    article p, details, #status { font-size: 13px; }
+    button { font: inherit; font-size: 13px; font-weight: 600; color: var(--text); background: var(--button); border: 1px solid var(--line); cursor: pointer; border-radius: 100px; padding: 8px 15px; min-width: 76px; }
+    button.primary { color: var(--ink); background: var(--tint); border-color: transparent; }
+    button:hover { filter: brightness(.95); }
+    :focus-visible { outline: 2px solid #9682c9; outline-offset: 3px; }
+    details { color: var(--muted); margin: 14px 4px; }
+    summary { cursor: pointer; width: fit-content; color: var(--text); }
+    details p { margin-top: 7px; }
+    #status { margin: 8px 4px 0; }
+    @media (max-width: 420px) { main { padding: 22px 16px; } .actions { padding: 0 14px; } article { gap: 12px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand"><picture><source media="(prefers-color-scheme: dark)" srcset="public/jard-dark.png"><img src="public/jard-light.png" alt="" width="28" height="28"></picture>Jard Audio</div>
+    <header>
+      <h1>Your audio, on your Mac.</h1>
+      <p>Record a conversation or open an audio file. Read who said what, jump to a moment, or ask a question about the transcript. Everything runs locally.</p>
+    </header>
+    <section class="actions" aria-label="App controls">
+      <article>
+        <div><h2>First time here?</h2><p>Install the app dependencies and download the speech and writing models once. Allow about 4 GB for the models.</p></div>
+        <button class="primary" data-action="setup">Set up</button>
+      </article>
+      <article>
+        <div><h2>Open your workspace</h2><p>Start Jard Audio in your browser or return to the app if it’s already running.</p></div>
+        <button data-action="start">Start</button>
+      </article>
+      <article>
+        <div><h2>Finished for now?</h2><p>Stop the local server and free its memory. Your saved recordings and notes stay on this Mac.</p></div>
+        <button data-action="quit">Quit</button>
+      </article>
+    </section>
+    <p id="status" role="status"></p>
+    <details><summary>What do I need for setup?</summary><p>Use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Setup needs internet access to install dependencies and download the models. After Terminal shows “Ready,” choose Start. Future sessions work offline.</p><p>If your browser asks to open Jard Audio Launcher, choose Open. On a fresh Mac, opening Jard Audio Launcher.app once in Finder registers the buttons with macOS.</p></details>
+  </main>
+  <script>
+    for (const button of document.querySelectorAll('[data-action]')) {
+      button.addEventListener('click', () => {
+        const page = encodeURIComponent(decodeURIComponent(location.pathname))
+        document.getElementById('status').textContent = 'Opening ' + button.textContent + ' in Terminal…'
+        location.href = 'jard-audio://' + button.dataset.action + '?page=' + page
+      })
+    }
+  </script>
+</body>
+</html>

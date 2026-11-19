@@ -1,0 +1,138 @@
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
+import { Pause, Play, RotateCcw, RotateCw } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { clock } from "@/speaker-activity"
+
+export function usePlayback(source: Blob | string | null, transcriptDuration: number | null) {
+  const audio = useRef<HTMLAudioElement>(null)
+  const [time, setTime] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [advancing, setAdvancing] = useState(false)
+  const [mediaDuration, setMediaDuration] = useState(0)
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState("")
+  const duration = mediaDuration || transcriptDuration || 0
+
+  useEffect(() => {
+    const el = audio.current
+    if (!el || !source) return
+    let url = typeof source === "string" ? source : URL.createObjectURL(source)
+    function release() {
+      if (url.startsWith("blob:")) URL.revokeObjectURL(url)
+    }
+    let preparing = false
+    const abort = new AbortController()
+    const options = { signal: abort.signal }
+    let frame = 0
+    const sync = () => setTime(el.currentTime)
+    let lastFrame = -Infinity
+    const tick = (now = performance.now()) => {
+      if (now - lastFrame >= 24) {
+        lastFrame = now
+        sync()
+      }
+      if (!el.paused) frame = requestAnimationFrame(tick)
+    }
+    function pause() {
+      cancelAnimationFrame(frame)
+      sync()
+      setAdvancing(false)
+      setPlaying(false)
+    }
+    const prepare = async () => {
+      if (preparing) {
+        setError("This audio could not be played.")
+        return
+      }
+      preparing = true
+      setReady(false)
+      try {
+        const savedId = typeof source === "string" ? source.split("/")[3] : null
+        const response = await fetch(savedId ? `/api/playback?saved=${savedId}` : "/api/playback", {
+          method: "POST", body: typeof source === "string" ? undefined : source, headers: { "Content-Type": "application/octet-stream" }, signal: abort.signal,
+        })
+        if (!response.ok) throw new Error()
+        const playable = await response.blob()
+        if (abort.signal.aborted) return
+        release()
+        url = URL.createObjectURL(playable)
+        el.src = url
+      } catch {
+        if (!abort.signal.aborted) setError("This audio could not be played.")
+      }
+    }
+    el.addEventListener("loadedmetadata", () => {
+      if (!Number.isFinite(el.duration) || el.duration <= 0) { void prepare(); return }
+      setMediaDuration(el.duration)
+      setReady(true)
+    }, options)
+    el.addEventListener("error", prepare, options)
+    el.addEventListener("play", () => setPlaying(true), options)
+    for (const event of ["waiting", "seeking"]) el.addEventListener(event, () => {
+      cancelAnimationFrame(frame)
+      setAdvancing(false)
+    }, options)
+    el.addEventListener("playing", () => {
+      cancelAnimationFrame(frame)
+      setError("")
+      setAdvancing(true)
+      tick()
+    }, options)
+    for (const event of ["pause", "ended"]) el.addEventListener(event, pause, options)
+    for (const event of ["seeked", "timeupdate"]) el.addEventListener(event, sync, options)
+    el.src = url
+    return () => {
+      abort.abort()
+      cancelAnimationFrame(frame)
+      el.pause()
+      el.removeAttribute("src")
+      el.load()
+      release()
+    }
+  }, [source])
+
+  const play = useCallback(() => {
+    void audio.current?.play().catch((reason: Error) => {
+      if (reason.name !== "AbortError") setError("Playback could not start.")
+    })
+  }, [])
+
+  const seek = useCallback((seconds: number, startPlaying = false) => {
+    const el = audio.current
+    if (!el || !ready) return
+    el.currentTime = Math.max(0, Math.min(seconds, duration))
+    setTime(el.currentTime)
+    if (startPlaying) play()
+  }, [duration, ready, play])
+
+  function toggle() {
+    const el = audio.current
+    if (!el) return
+    if (el.paused) play()
+    else el.pause()
+  }
+
+  return { audio, time, playing, advancing, duration, ready, error, seek, toggle }
+}
+
+export function AudioPlayer({ player }: { player: ReturnType<typeof usePlayback> }) {
+  const { audio, time, duration, ready, playing, error, seek, toggle } = player
+  return <div className="audio-player" role="group" aria-label="Audio player">
+    <audio ref={audio} preload="metadata" />
+    <div className="transport">
+      <Button variant="ghost" size="icon-sm" disabled={!ready} aria-label="Back 10 seconds" title="Back 10 seconds" onClick={() => seek(time - 10)}><RotateCcw /><span className="skip-seconds" aria-hidden="true">10</span></Button>
+      <Button className="play-button" size="icon" disabled={!ready} aria-label={playing ? "Pause" : "Play"} onClick={toggle}>
+        {playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
+      </Button>
+      <Button variant="ghost" size="icon-sm" disabled={!ready} aria-label="Forward 10 seconds" title="Forward 10 seconds" onClick={() => seek(time + 10)}><RotateCw /><span className="skip-seconds" aria-hidden="true">10</span></Button>
+    </div>
+    {error ? <span className="player-status" role="alert">{error}</span> : !ready ? <span className="player-status" role="status">Preparing playback…</span> : <>
+      <span className="player-time">{clock(time)}</span>
+      <input className="player-scrubber" type="range" min="0" max={duration || 1} step="0.01"
+        value={Math.min(time, duration)} disabled={!ready} aria-label="Playback position" aria-valuetext={clock(time)}
+        style={{ "--played": `${duration ? 100 * time / duration : 0}%` } as CSSProperties}
+        onChange={event => seek(event.currentTarget.valueAsNumber)} />
+      <span className="player-time">{clock(duration)}</span>
+    </>}
+  </div>
+}
