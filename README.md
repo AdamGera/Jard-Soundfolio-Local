@@ -10,7 +10,7 @@ At Jard (Joint AI Research & Dynamics), we believe inference belongs close to th
 
 ## Get started on your Mac
 
-Use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [source ZIP](https://github.com/AdamGera/Soundfolio-Local/archive/refs/heads/main.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
+Use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [Jard Soundfolio Local source ZIP](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.1.0/Jard-Soundfolio-Local.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
 
 The browser interface connects to the engine on your Mac at `http://127.0.0.1:8765`. You can also use the welcome page.
 
