@@ -1,6 +1,6 @@
 # Jard Soundfolio Local
 
-**[Download for Mac (.dmg)](https://github.com/AdamGera/Soundfolio-Local/releases/download/v0.0.5/Jard-Soundfolio-Local-arm64.dmg)** · v0.0.5 · Apple Silicon · macOS 26+
+**[Download for Mac (.dmg)](https://github.com/AdamGera/Jard-Soundfolio-Local/releases/download/v0.0.5/Jard-Soundfolio-Local-arm64.dmg)** · v0.0.5 · Apple Silicon · macOS 26+
 
 *Your recordings, transcripts, and notes stay on your Mac.*
 
@@ -38,9 +38,13 @@ Open **Settings** in the Mac sidebar to check microphone and Mac audio permissio
 - **Mac audio.** Use the guide’s settings button to open **Privacy & Security → Screen & System Audio Recording**. Enable Jard in the section for **screen and system audio**. Jard uses ScreenCaptureKit and saves only the audio. If its row is missing, click **+** under that section and select **Jard Soundfolio Local.app**. **Show this app in Finder** locates the exact copy you opened. [Apple’s screen and system audio settings guide](https://support.apple.com/guide/mac-help/control-access-screen-system-audio-recording-mchld6aa7d23/mac)
 - **After changing access.** If the switch is already on and capture was still refused, quit Jard with **⌘Q** and reopen the copy in **Applications**. If macOS offers **Quit & Reopen**, choose it. Otherwise return to the recording guide, check access, and select **Retry recording** when ready. A restriction imposed by a managed Mac may require your administrator.
 
+### Existing clones and launchers
+
+The repository is now `AdamGera/Jard-Soundfolio-Local`. GitHub redirects the previous URL. You can keep your existing checkout folder and update its remote with `git remote set-url origin https://github.com/AdamGera/Jard-Soundfolio-Local.git`. The older **Jard Audio** commands in a current checkout forward to the corresponding **Jard Soundfolio Local** commands.
+
 ### Browser application
 
-For the source installation, use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [Jard Soundfolio Local source ZIP](https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-native-source.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
+For the source installation, use an Apple Silicon Mac running macOS 26 with Bun, uv, and FFmpeg installed. Download and extract the [Jard Soundfolio Local source ZIP](https://github.com/AdamGera/Jard-Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-native-source.zip) or clone this repository. In Finder, double-click **Setup Jard Soundfolio Local.command**. When Terminal shows **Ready**, open **Start Jard Soundfolio Local.command**. Allow about 4 GB for the models, plus space for dependencies and your recordings.
 
 The browser interface connects to the engine on your Mac at `http://127.0.0.1:8765`. You can also use the welcome page.
 

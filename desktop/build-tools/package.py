@@ -225,7 +225,7 @@ def main():
             archive = stage / "Jard-Soundfolio-Local-arm64.zip"
             # The installer expects exactly one top-level .app, including its symlinks and executable modes.
             run("ditto", "-c", "-k", "--norsrc", "--keepParent", app, archive)
-            url = f"https://github.com/AdamGera/Soundfolio-Local/releases/download/v{version}/{archive.name}"
+            url = f"https://github.com/AdamGera/Jard-Soundfolio-Local/releases/download/v{version}/{archive.name}"
             feed = stage / "native-update.json"
             run("native", "update", "sign", "--manifest", DESKTOP / "app.json",
                 "--target", "macos-aarch64", "--archive", archive, "--url", url,

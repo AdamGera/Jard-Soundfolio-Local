@@ -15,4 +15,4 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://www.jard.ai/"
-Repository = "https://github.com/AdamGera/Soundfolio-Local"
+Repository = "https://github.com/AdamGera/Jard-Soundfolio-Local"

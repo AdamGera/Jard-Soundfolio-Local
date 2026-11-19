@@ -43,7 +43,7 @@
     }
   ],
   "updates": {
-    "feed_url": "https://github.com/AdamGera/Soundfolio-Local/releases/latest/download/native-update.json",
+    "feed_url": "https://github.com/AdamGera/Jard-Soundfolio-Local/releases/latest/download/native-update.json",
     "public_key": "dxMjVxu9nD8oMW/Cx+DNTJ2sYv8JS8z95lJkz63hBMM=",
     "check_on_start": true
   }
