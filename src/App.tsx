@@ -1,8 +1,9 @@
 import { useEffect, useEffectEvent, useRef, useState, type ChangeEvent } from "react"
 import { ChevronDown, FolderOpen, Mic, Plus, Square, UsersRound } from "lucide-react"
 
-import { captureSources, desktopBridge, recordingPermissions, RECORDING_MODES, savedRecordingMode, type CaptureSource, type DesktopCaptureEvent, type RecordingDraft, type RecordingMode, type RecordingPermissions } from "./desktop"
-import { RecordingAccessDialog } from "@/components/recording-permissions"
+import { captureSources, desktopBridge, RECORDING_MODES, savedRecordingMode, type CaptureSource, type DesktopCaptureEvent, type RecordingDraft, type RecordingMode } from "./desktop"
+import { useRecordingAccess } from "./use-recording-access"
+import { RecordingAccessDialog, RecordingAccessSettings } from "@/components/recording-permissions"
 import { readSessionRoute, writeSessionRoute } from "./session-route"
 import { clock, speakerLabel } from "./speaker-activity"
 import { QuitButton } from "@/components/quit-button"
@@ -69,10 +70,14 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const [elapsed, setElapsed] = useState(0)
   const [level, setLevel] = useState(0)
   const native = desktopBridge()
-  const [permissionGuide, setPermissionGuide] = useState<RecordingPermissions | null>(null)
-  const [inspectingAccess, setInspectingAccess] = useState(false)
+  const recordingAccess = useRecordingAccess(native)
+  const [permissionGuide, setPermissionGuide] = useState<"inspection" | "record" | null>(null)
   const [refusedSource, setRefusedSource] = useState<CaptureSource | null>(null)
   const [mode, setMode] = useState<RecordingMode>(savedRecordingMode)
+  const selectedSources = captureSources(mode)
+  const selectedRefusal = refusedSource && selectedSources.includes(refusedSource) ? refusedSource : null
+  const needsRecordingAccess = !!selectedRefusal || (recordingAccess.checked &&
+    selectedSources.some(source => recordingAccess.permissions[source] !== "granted"))
   const [microphoneName, setMicrophoneName] = useState("Mac default microphone")
   const [systemLevel, setSystemLevel] = useState(0)
   const [choosingFile, setChoosingFile] = useState(false)
@@ -203,6 +208,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     deviceRevision.current++
     switch (event.event) {
       case "started":
+        if (refusedSource && captureSources(event.mode).includes(refusedSource)) setRefusedSource(null)
         nativeCapture.current = true
         nativeStopping.current = false
         setMode(event.mode)
@@ -247,9 +253,9 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         nativeStopping.current = false
         setPhase("idle")
         if (event.permission) {
-          setInspectingAccess(false)
+          recordingAccess.refused(event.permission)
           setRefusedSource(event.permission)
-          setPermissionGuide({ [event.permission]: "denied" })
+          setPermissionGuide("record")
           setFeedback("")
         } else setFeedback(event.message)
         break
@@ -410,16 +416,13 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     const id = withSpeakers ? crypto.randomUUID() : undefined
     try {
       if (native) {
-        setInspectingAccess(false)
-        const statuses = await recordingPermissions(native, mode)
+        const statuses = await recordingAccess.check(mode)
         const sources = captureSources(mode)
         if (sources.some(source => statuses[source] !== "granted")) {
-          setPermissionGuide({ ...statuses })
+          setPermissionGuide("record")
           for (const source of sources) {
             if (statuses[source] !== "unavailable") continue
-            const permission = await native.request("permission", { source, prompt: true })
-            statuses[source] = permission.status
-            setPermissionGuide({ ...statuses })
+            statuses[source] = await recordingAccess.request(source)
           }
           if (sources.some(source => statuses[source] !== "granted")) {
             setPhase("idle")
@@ -427,7 +430,6 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
           }
         }
         setPermissionGuide(null)
-        setRefusedSource(null)
         nativeCapture.current = true
         nativeStopping.current = false
         await native.request("record", { mode, live, diarization: withSpeakers, languages })
@@ -561,19 +563,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
 
   function changeMode(value: RecordingMode) {
     setPermissionGuide(null)
-    setRefusedSource(null)
     setMode(value)
     try { localStorage.setItem("jard.recordingMode", value) } catch { /* Use this choice for this window. */ }
-  }
-
-  async function showRecordingAccess() {
-    if (!native) return
-    try {
-      const statuses = await recordingPermissions(native, mode)
-      setRefusedSource(null)
-      setInspectingAccess(true)
-      setPermissionGuide(statuses)
-    } catch (error) { setFeedback(message(error)) }
   }
 
   async function openFile(event: ChangeEvent<HTMLInputElement>) {
@@ -613,7 +604,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const recordingActivity = live && !previewPaused ? "Live preview" : "Transcribes when you stop"
   const emptyText = recording
     ? live && !previewPaused ? "Listening for speech…" : "Your transcript will appear when you stop."
-    : "Record or open an audio file to get started."
+    : "Record or open audio."
   const progressLabel = restoring ? "Opening session…" : processingSavedAudio ? "Transcribing audio…" : preparingModel ? "Loading local models…"
     : phase === "starting" ? "Waiting for microphone…"
       : processed ? "Transcribing audio…" : "Preparing audio…"
@@ -644,7 +635,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   }
 
   return (
-    <SessionLibrary busy={phase !== "idle" || restoring} currentId={current?.id}
+    <SessionLibrary settings={native && <RecordingAccessSettings native={native} access={recordingAccess} refusedSource={refusedSource} />}
+      busy={phase !== "idle" || restoring} currentId={current?.id}
       onHome={newSession} onSelect={openSaved} onDelete={id => {
         if (current?.id !== id && readSessionRoute().id !== id) return
         restoreRequest.current?.abort()
@@ -708,21 +700,18 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
             </Button>
             <input ref={fileInput} type="file" accept="audio/*,.mp3,.wav,.m4a" onChange={(event) => void openFile(event)} hidden />
           </div>
-          <div className="activity" role="status">
-            {recording && (
-              <span className="capture-status">
-                {(!native || mode !== "system") && <span className="capture-meter">
-                  {native && <span>Mic</span>}<meter min={0} max={1} value={level} aria-label="Microphone level" />
-                </span>}
-                {native && mode !== "mic" && <span className="capture-meter">
-                  <span>Mac audio</span><meter min={0} max={1} value={systemLevel} aria-label="Mac audio level" />
-                </span>}
-                <span className="timer" aria-hidden="true">{clock(elapsed)}</span>
-              </span>
-            )}
-            {recording && <span>{recordingActivity}</span>}
-            {canStart && !recording && <span>Your recordings, transcripts, and notes stay on your Mac.</span>}
-          </div>
+          {recording && <div className="activity" role="status">
+            <span className="capture-status">
+              {(!native || mode !== "system") && <span className="capture-meter">
+                {native && <span>Mic</span>}<meter min={0} max={1} value={level} aria-label="Microphone level" />
+              </span>}
+              {native && mode !== "mic" && <span className="capture-meter">
+                <span>Mac audio</span><meter min={0} max={1} value={systemLevel} aria-label="Mac audio level" />
+              </span>}
+              <span className="timer" aria-hidden="true">{clock(elapsed)}</span>
+            </span>
+            <span>{recordingActivity}</span>
+          </div>}
           {(feedback || status === "error") && (
             <p className="feedback" role="alert">
               {feedback || "Jard Soundfolio Local could not start. Check the launcher, then reload this page."}
@@ -760,8 +749,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
             {mode !== "system" && <span className="native-input-name" title="Current input from macOS Sound settings">
               {microphoneName}
             </span>}
-            <button className="native-permission-link" type="button" disabled={phase !== "idle" || choosingFile}
-              onClick={() => void showRecordingAccess()}>Recording access</button>
+            {needsRecordingAccess && <button className="native-permission-link" type="button" disabled={phase !== "idle" || choosingFile}
+              onClick={() => setPermissionGuide("inspection")}>Recording access</button>}
           </div>}
           {!!recoveredAudio.length && <section className="native-recovery" aria-label="Interrupted recordings">
             {recoveredAudio.map(d => <div className="native-recovery-row" key={d.id}>
@@ -780,9 +769,9 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         <Downloads item={current} /></>}
       </main>
     </div>
-    {native && permissionGuide && <RecordingAccessDialog native={native} mode={mode} permissions={permissionGuide} inspection={inspectingAccess}
-      refusedSource={refusedSource} starting={phase === "starting"} onChange={setPermissionGuide}
-      onClose={() => { setPermissionGuide(null); setRefusedSource(null) }} onRetry={() => void startRecording()} />}
+    {native && permissionGuide && <RecordingAccessDialog native={native} mode={mode} access={recordingAccess} inspection={permissionGuide === "inspection"}
+      refusedSource={selectedRefusal} starting={phase === "starting"}
+      onClose={() => setPermissionGuide(null)} onRetry={() => void startRecording()} />}
     </SessionLibrary>
   )
 }

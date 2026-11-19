@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { AlertDialog, Dialog, Tooltip } from "radix-ui"
-import { ChevronDown, FileAudio2, House, PanelLeft, Search, Trash2 } from "lucide-react"
+import { ArrowLeft, ChevronDown, FileAudio2, House, PanelLeft, Search, Settings, Trash2 } from "lucide-react"
 import { readSession, type SavedSession } from "@/audio"
 import { useSessionList, type SessionSummary } from "@/session-list"
 import { SessionSearch } from "./session-search"
@@ -16,10 +16,11 @@ type Props = {
   onHome: () => void
   onSelect: (session: SavedSession) => void
   onDelete: (id: string) => void
+  settings?: ReactNode
   children: ReactNode
 }
 
-export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, children }: Props) {
+export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, settings, children }: Props) {
   const [compact, setCompact] = useState(() => matchMedia(compactWindow).matches)
   const [pinned, setPinned] = useState(() => {
     try { return localStorage.getItem("jard.sidebar") !== "collapsed" } catch { return true }
@@ -28,6 +29,9 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
   const expanded = compact ? overlay : pinned
   const [showSessions, setShowSessions] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const settingsTitle = useRef<HTMLHeadingElement>(null)
+  const settingsButton = useRef<HTMLButtonElement>(null)
   const [selectionError, setSelectionError] = useState("")
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
   const [deletePending, setDeletePending] = useState(false)
@@ -76,11 +80,26 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
     return () => window.removeEventListener("keydown", keydown)
   }, [busy, deleting])
 
+  function openSettings() {
+    request.current?.abort()
+    setSelectionError("")
+    setOverlay(false)
+    setSettingsOpen(true)
+  }
+  useEffect(() => {
+    if (!settingsOpen) return
+    settingsTitle.current?.focus()
+    const close = () => setSettingsOpen(false)
+    window.addEventListener("popstate", close)
+    return () => window.removeEventListener("popstate", close)
+  }, [settingsOpen])
+
   function home() {
     if (busy) return
     request.current?.abort()
     setOverlay(false)
     setSelectionError("")
+    setSettingsOpen(false)
     onHome()
   }
   async function select(id: string) {
@@ -93,6 +112,7 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
       const session = await readSession(id, abort.signal)
       if (abort.signal.aborted) return
       setOverlay(false)
+      setSettingsOpen(false)
       onSelect(session)
     } catch (error) {
       if (!abort.signal.aborted) setSelectionError(error instanceof Error ? error.message : "Could not open session.")
@@ -141,7 +161,7 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
     </div>
   }
   const navigation = <nav id="workspace-sidebar" aria-label="Workspace" className="sidebar-navigation">
-    <button className="sidebar-home" disabled={busy} onClick={home} aria-current={!currentId ? "page" : undefined}>
+    <button className="sidebar-home" disabled={busy} onClick={home} aria-current={!settingsOpen && !currentId ? "page" : undefined}>
       <House aria-hidden="true" />Home
     </button>
     <button className="sidebar-section" aria-expanded={showSessions} aria-controls="sidebar-sessions"
@@ -151,9 +171,9 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
     <div className="sidebar-list" id="sidebar-sessions" hidden={!showSessions}>
       {list.error ? <button className="sidebar-retry" onClick={list.refresh}>Couldn’t load sessions. Retry</button>
         : !list.rows.length && <p>{list.loading ? "Loading sessions…" : "No saved sessions yet."}</p>}
-      {list.rows.map(row => <div key={row.id} className="sidebar-row" data-current={row.id === currentId}>
+      {list.rows.map(row => <div key={row.id} className="sidebar-row" data-current={!settingsOpen && row.id === currentId}>
         <button className="library-open" disabled={busy || row.status === "processing"}
-          aria-current={row.id === currentId ? "page" : undefined} title={row.name + " · " + date.format(new Date(row.created))}
+          aria-current={!settingsOpen && row.id === currentId ? "page" : undefined} title={row.name + " · " + date.format(new Date(row.created))}
           onClick={() => void select(row.id)}>
           <FileAudio2 aria-hidden="true" /><span dir="auto">{row.name}</span>
           {row.status !== "complete" && <small>{row.status === "processing" ? "Processing" : "Interrupted"}</small>}
@@ -168,6 +188,10 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
         </button>
       </div>)}
     </div>
+    {settings && <button type="button" ref={settingsButton} className="sidebar-home sidebar-settings" disabled={busy}
+      aria-current={settingsOpen ? "page" : undefined} onClick={openSettings}>
+      <Settings aria-hidden="true" />Settings
+    </button>}
   </nav>
 
   return <Tooltip.Provider delayDuration={360} skipDelayDuration={100}><div className="workspace-frame" data-sidebar={expanded && !compact}>
@@ -183,13 +207,22 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, ch
             if (!deletePending) setDeleting(null)
           }}
           onInteractOutside={event => { if (deleting) event.preventDefault() }}
-          onCloseAutoFocus={event => { event.preventDefault(); if (!searchOpen) toggleButton.current?.focus() }}>
+          onCloseAutoFocus={event => { event.preventDefault(); if (settingsOpen) settingsTitle.current?.focus(); else if (!searchOpen) toggleButton.current?.focus() }}>
           <Dialog.Title className="sr-only">Workspace sidebar</Dialog.Title>
           {tools(true)}{navigation}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-    <div className="workspace-content">{children}</div>
+    <div className="workspace-content" hidden={settingsOpen}>{children}</div>
+    {settingsOpen && <main className="workspace-settings">
+      <button type="button" className="settings-back" onClick={() => {
+        setSettingsOpen(false)
+        const target = expanded && !compact ? settingsButton.current : toggleButton.current
+        target?.focus()
+      }}><ArrowLeft aria-hidden="true" />Back</button>
+      <h1 tabIndex={-1} ref={settingsTitle}>Settings</h1>
+      {settings}
+    </main>}
     {selectionError && <div className="navigation-error" role="alert">{selectionError}
       <button onClick={() => setSelectionError("")}>Dismiss</button></div>}
     <SessionSearch open={searchOpen && !busy} onOpenChange={open => {

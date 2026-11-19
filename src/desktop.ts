@@ -103,16 +103,6 @@ export function desktopBridge() {
   return typeof window.jardDesktop?.request === "function" ? window.jardDesktop : undefined
 }
 
-/** Check every selected source without starting capture. Only Record or an
- * explicit permission button may initiate a macOS prompt. */
-export async function recordingPermissions(native: DesktopBridge, mode: RecordingMode): Promise<RecordingPermissions> {
-  const entries = await Promise.all(captureSources(mode).map(async source => {
-    const { status } = await native.request("permission", { source, prompt: false })
-    return [source, status] as const
-  }))
-  return Object.fromEntries(entries)
-}
-
 export function savedRecordingMode(): RecordingMode {
   try {
     const value = localStorage.getItem("jard.recordingMode")

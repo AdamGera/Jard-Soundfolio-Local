@@ -1,0 +1,7 @@
+.recording-settings { max-width: 34rem; }
+.recording-settings h2 { font-size: 1rem; font-weight: 600; }
+.recording-settings > p { margin-block: .55rem; color: var(--quiet); font-size: .82rem; }
+.recording-settings .recording-access-sources { margin-top: .65rem; }
+.recording-settings .recording-access-help { margin-bottom: 1rem; }
+.recording-access-action .recording-access-allowed { justify-content: end; }
+.recording-settings .recording-access-action button + button { margin-inline-start: .3rem; }
