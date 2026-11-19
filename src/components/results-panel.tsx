@@ -61,7 +61,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     onTab(value)
   }, [onTab])
   useEffect(() => {
-    if (tab !== "transcript" || !result.text || recording || working) return
+    if (!complete || tab !== "transcript" || !result.text || recording || working) return
     function find(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f" || event.altKey || event.shiftKey) return
       if (document.querySelector('[role="dialog"], [role="listbox"]')) return
@@ -73,7 +73,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     }
     document.addEventListener("keydown", find)
     return () => document.removeEventListener("keydown", find)
-  }, [tab, result.text, recording, working])
+  }, [complete, tab, result.text, recording, working])
   const { seek, ready, wave: waveRef } = player
   const cite = useCallback((seconds: number) => {
     setDock(null)
@@ -118,8 +118,28 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
     </p>
     {showingPrevious && <small>Showing saved {languageName(version.language)} {tab === "timeline" ? "timeline" : "overview"}</small>}
   </div> : null
-  return <div className={complete ? "session-sheet" : undefined}>
-    {complete && <header className="session-heading">
+  const transcriptContent = result.text ? (
+    <Suspense fallback={null}>
+      <TimedTranscript result={result} time={player.time} ready={ready} seek={player.seek}
+        citation={citation} matches={matches} activeMatch={currentMatch} />
+    </Suspense>
+  ) : (
+    <div className="empty-state">
+      <span className="empty-icon" data-working={working} aria-hidden="true"><AudioLines /></span>
+      {working ? progress : <p>{emptyText}</p>}
+    </div>
+  )
+  const transcriptClass = result.text ? "transcript-body has-text" : "transcript-body"
+  if (!complete) return <section className="transcript-panel capture-panel" aria-label="Transcript">
+    <div className={transcriptClass} ref={area} tabIndex={result.text ? 0 : undefined}>
+      {transcriptContent}
+    </div>
+    {working && result.text && <div className="processing-footer">{progress}</div>}
+    {source && <AudioPlayer player={player} />}
+  </section>
+
+  return <div className="session-sheet">
+    <header className="session-heading">
       <h1 dir="auto">{draft?.title || version?.title || session.name}</h1>
       <div className="session-meta">
         <span><CalendarDays aria-hidden="true" />{date.format(new Date(session.created))}</span>
@@ -131,12 +151,12 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
           disabled={writing.status === "queued" || overview.requesting}
           onClick={() => overview.regenerate(writingTab)}><RotateCw aria-hidden="true" /><span>Regenerate</span></Button>}
       </div>
-    </header>}
+    </header>
     <Tabs className="transcript-panel" data-finding={findOpen && tab === "transcript"} value={tab} onValueChange={changeTab}>
       <div className="panel-heading" data-scrolled={scrolled}>
         <TabsList ref={tabList} aria-label="Recording results">
-          {complete && <TabsTrigger value="overview">Overview</TabsTrigger>}
-          {complete && <TabsTrigger value="timeline">Timeline</TabsTrigger>}
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="transcript">Transcript</TabsTrigger>
           <TabsTrigger value="analytics" disabled={working || recording}>Speaker analytics</TabsTrigger>
         </TabsList>
@@ -148,7 +168,7 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
             {copied ? <Check /> : <Copy />}<span>{copied ? "Copied" : "Copy"}</span>
           </Button></div>}
       </div>
-      {complete && <TabsContent value="overview" className="note-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
+      <TabsContent value="overview" className="note-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         {noteStatus}
         {note && <div className="overview-copy" dir="auto" lang={note.language}>
           {note.summary && <p className="note-lead">{note.summary}</p>}
@@ -156,8 +176,8 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
             <NoteMarkdown text={note.markdown} ready={ready} cite={seconds => seek(seconds, true)} />
           </Suspense>}
         </div>}
-      </TabsContent>}
-      {complete && <TabsContent value="timeline" className="note-body timeline-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
+      </TabsContent>
+      <TabsContent value="timeline" className="note-body timeline-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         {noteStatus}
         {timeline && <ol className="topic-list" aria-label="Topic timeline" lang={timeline.language}>
           {timeline.topics.map((topic,i) => <li key={i}>
@@ -169,21 +189,17 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
             </button>
           </li>)}
         </ol>}
-      </TabsContent>}
-      <TabsContent value="transcript" className={result.text ? "transcript-body has-text" : "transcript-body"}
+      </TabsContent>
+      <TabsContent value="transcript" className={transcriptClass}
         ref={area} onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
-        {result.text ? <Suspense fallback={null}><TimedTranscript result={result} time={player.time} ready={ready} seek={player.seek} citation={citation} matches={matches} activeMatch={currentMatch} /></Suspense> :
-          <div className="empty-state"><span className="empty-icon" data-working={working} aria-hidden="true"><AudioLines /></span>
-            {working ? progress : <p>{emptyText}</p>}
-          </div>}
+        {transcriptContent}
       </TabsContent>
       <TabsContent value="analytics" className="analytics-body" onScroll={e => setScrolled(e.currentTarget.scrollTop > 2)}>
         <Suspense fallback={null}><SpeakerAnalytics result={result} time={player.time} ready={ready} seek={player.seek} /></Suspense>
       </TabsContent>
       {working && result.text && <div className="processing-footer">{progress}</div>}
-      {!complete && source && <AudioPlayer player={player} />}
     </Tabs>
-    {complete && <footer className="session-dock" aria-label="Recording tools">
+    <footer className="session-dock" aria-label="Recording tools">
       {source && <>
         <div id="session-audio-player" className="audio-popover" hidden={dock !== "audio"}>
           <AudioPlayer player={player} />
@@ -199,6 +215,6 @@ export function ResultsPanel({ result, session, source, tab, onTab, working, rec
           onOpen={toggleChat} onExpand={resizeChat}
           ready={ready} cite={cite} />
       </Suspense>}
-    </footer>}
+    </footer>
   </div>
 }

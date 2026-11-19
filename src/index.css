@@ -221,6 +221,9 @@
   scroll-padding-top: var(--header-height);
 }
 
+.capture-panel .transcript-body { padding-block: 1.5rem; scroll-padding-top: 1.5rem; }
+.capture-panel .empty-state { margin-bottom: 0; }
+
 .transcript-body.has-text {
   display: block;
   overflow: auto;
