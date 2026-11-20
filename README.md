@@ -36,6 +36,8 @@ To use the same session library in your browser, choose **File → Open in Brows
 
 ## Why we made it
 
-We built Jaro at Jard (Joint AI Research & Dynamics) to make it easy to return to what someone actually said and get your own thoughts into writing. Your recordings and notes stay on your Mac. [About Jard](https://www.jard.ai/)
+At Jard (Joint AI Research & Dynamics), we believe intelligence should live on the edge, on the devices we use every day. A larger model is worth bringing in when a task needs more capability.
 
-Jaro is free and open source under Apache 2.0. [License](LICENSE) · [Model credits](NOTICE) · [Mac build details](desktop/build-tools/README.md)
+Recent advances in speech recognition and compact language models have made dictation, transcripts, and meeting summaries practical on a Mac. We built Jaro to put that research to work today, with your recordings and notes staying on your device. We expect more to become possible on-device as the research progresses.
+
+Jaro is free and open source under Apache 2.0. Download it and try it, read the source, contribute an improvement, or fork it and build your own version. [License](LICENSE) · [Model credits](NOTICE) · [Mac build details](desktop/build-tools/README.md) · [About Jard](https://www.jard.ai/)
