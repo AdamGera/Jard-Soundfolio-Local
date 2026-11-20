@@ -1,4 +1,4 @@
-"""Draw the Soundfolio README animation from fictional data with Pillow.
+"""Draw the Jaro meeting animation from fictional data with Pillow.
 
 Run with: uv run --no-project --with pillow==13.0.0 python tools/render_readme_demo.py
 """
@@ -174,7 +174,7 @@ def window(view):
         canvas.dot(x, 37, 5, color)
     canvas.dot(212, 37, 9, None, MUTED)
     canvas.dot(215, 34, 1.2, INK)
-    canvas.text(229, 37, "Jard Soundfolio Local", 14, INK, "bold")
+    canvas.text(229, 37, "Jaro", 14, INK, "bold")
     canvas.icon("plus", 810, 29)
     canvas.text(831, 37, "New session", 13, QUIET)
 

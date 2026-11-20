@@ -1,29 +1,41 @@
-# Jard Soundfolio Local
+# Jaro — By Jard
 
-Record meetings or open an audio file. Get a searchable transcript, an editable overview, and a timeline you can play back. Your recordings and notes stay on your Mac.
+Jaro is a local audio app for Mac. Dictate into the app you’re already using, record meetings, or transcribe an audio file. Transcription runs on your Mac.
 
-**[Download for Mac](https://github.com/AdamGera/Jard-Soundfolio-Local/releases/latest/download/Jard-Soundfolio-Local-arm64.dmg)** · Apple Silicon · macOS 26 or later
+**[Download for Mac](https://github.com/AdamGera/Jaro/releases/latest/download/Jard-Soundfolio-Local-arm64.dmg)** · Apple Silicon · macOS 26 or later
+
+## Meetings
+
+Record your microphone, Mac audio, or both. You can also open a recording you already have.
 
 ![Illustrated dark-mode demo. Open a saved session from Home, read its overview, jump through timeline chapters, follow the transcript, and explore each speaker’s activity.](docs/media/soundfolio-demo.gif)
 
-## How it works
+Open **Overview** for an editable summary or **Timeline** to jump to a topic. Search the **Transcript** and click a timestamp to hear that moment. **Speaker analytics** shows when each person spoke and their share of speaking time.
 
-1. From **Home**, choose **Record** to capture your microphone, Mac audio, or both. Choose **Open audio** if you already have a recording.
-2. When transcription finishes, open **Overview** for a summary or **Timeline** to jump to a topic. Click a timestamp to hear that moment.
-3. In **Transcript**, search for words or play a speaker’s turn. **Speaker analytics** shows when each person spoke and their share of speaking time.
+Type or dictate in **My Notes** to add context, then choose **Update overview** to use it in the summary. You can also ask a question in **Chat**.
 
-Type or dictate in **My Notes** to add context, then choose **Update overview** to use it in the summary. You can also edit the overview directly or ask a question in **Chat**.
+## System Dictation
+
+Use your voice to write in an email, message, or document. The demo shows a preview of System Dictation.
+
+![Illustrated dark-mode demo. Click inside a message, hold Right Option while speaking, then release. The dictation indicator animates and Jaro inserts the text at the cursor.](docs/media/dictation-demo.gif)
+
+1. Open **Settings → System Dictation** and allow **Microphone** and **Accessibility** access.
+2. With Jaro running, click where you want the text to go. Hold **Right Option** and speak.
+3. Release **Right Option**. Jaro inserts the text at your cursor.
+
+Double-tap **Right Option** for hands-free dictation, then press it again to finish. [Dictation settings and shortcuts](docs/system-dictation.md)
 
 ## Install
 
-Open the DMG, drag Jard Soundfolio Local to **Applications**, and open it. First launch downloads about 4 GB of models. After setup, transcription, speaker labeling, and summaries work offline.
+Open the DMG, drag the app to **Applications**, and open it. First launch downloads about 4 GB of models. After setup, transcription, speaker labeling, and summaries work offline.
 
 Allow microphone or Mac audio access when you first record from those sources. The app is signed by Jard, and macOS may require first-launch approval.
 
-To update an existing copy, choose **Jard Soundfolio Local → Check for Updates…**. To use the same session library in your browser, choose **File → Open in Browser**.
+To use the same session library in your browser, choose **File → Open in Browser**.
 
 ## Why we made it
 
-We wanted to get back to what someone actually said without sending the conversation away. We built Soundfolio at Jard (Joint AI Research & Dynamics) to make reviewing recordings on your own Mac easy. It’s free and open source. [About Jard](https://www.jard.ai/)
+We built Jaro at Jard (Joint AI Research & Dynamics) to make it easy to return to what someone actually said and get your own thoughts into writing. Your recordings and notes stay on your Mac. [About Jard](https://www.jard.ai/)
 
-Soundfolio’s code is licensed under Apache 2.0. Rumble-2-Flash handles speech recognition, Nemotron 3 labels speakers, and Qwen3.5 writes summaries. [License](LICENSE) · [Rumble-2-Flash](https://huggingface.co/Reson8/Rumble-2-Flash) · [Nemotron 3](https://huggingface.co/nvidia/Nemotron-3-Diarization) · [Qwen3.5](https://huggingface.co/axteam/Qwen3.5-2B-GGUF)
+Jaro is free and open source under Apache 2.0. [License](LICENSE) · [Model credits](NOTICE) · [Mac build details](desktop/build-tools/README.md)
