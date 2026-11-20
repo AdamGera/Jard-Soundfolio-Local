@@ -17,8 +17,8 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
       const response = await fetch("/api/quit", { method: "POST", headers: { "X-Jard-Action": "quit" } })
       if (response.status === 405 || response.status === 404) {
         // An already-running older server can serve the new UI before its next restart.
-        if (!import.meta.env.JARD_WELCOME_PAGE) throw new Error("Quit the older server using its Quit Jard Soundfolio Local.command in Finder.")
-        window.location.href = "jard-soundfolio-local://quit?page=" + encodeURIComponent(import.meta.env.JARD_WELCOME_PAGE)
+        if (!import.meta.env.JARD_WELCOME_PAGE) throw new Error("Quit the older server using its Quit command in Finder.")
+        window.location.href = "jaro://quit?page=" + encodeURIComponent(import.meta.env.JARD_WELCOME_PAGE)
         for (let attempt = 0; attempt < 12; attempt++) {
           await new Promise(resolve => setTimeout(resolve, 500))
           try {
@@ -27,24 +27,24 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
             if (reason instanceof TypeError) { onQuit(); return }
           }
         }
-        throw new Error("Jard Soundfolio Local is still running. Allow the browser to open Jard Soundfolio Local Launcher, then try again.")
+        throw new Error("Jaro is still running. Allow the browser to open Jaro Launcher, then try again.")
       }
-      if (!response.ok) throw new Error("Jard Soundfolio Local could not quit. Try again.")
+      if (!response.ok) throw new Error("Jaro could not quit. Try again.")
       onQuit()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not reach Jard Soundfolio Local.")
+      setError(reason instanceof Error ? reason.message : "Could not reach Jaro.")
       setBusy(false)
     }
   }
 
   return <AlertDialog.Root onOpenChange={() => setError("")}>
     <AlertDialog.Trigger asChild>
-      <Button size="icon-sm" variant="ghost" title="Quit Jard Soundfolio Local Everywhere" aria-label="Quit Jard Soundfolio Local Everywhere"><Power /></Button>
+      <Button size="icon-sm" variant="ghost" title="Quit Jaro Everywhere" aria-label="Quit Jaro Everywhere"><Power /></Button>
     </AlertDialog.Trigger>
     <AlertDialog.Portal>
       <AlertDialog.Overlay className="note-language-scrim" />
       <AlertDialog.Content className="note-language-confirm" onEscapeKeyDown={event => { if (busy) event.preventDefault() }}>
-        <AlertDialog.Title>Quit Jard Soundfolio Local Everywhere?</AlertDialog.Title>
+        <AlertDialog.Title>Quit Jaro Everywhere?</AlertDialog.Title>
         <AlertDialog.Description>
           {recording && (native ? "The Mac app will save your recording first. " : "Quitting will discard this browser recording. ")}
           This stops the shared engine and active jobs for all clients. To leave other clients working, close this {native ? "window" : "tab"}.

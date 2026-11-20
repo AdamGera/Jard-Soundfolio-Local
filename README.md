@@ -1,14 +1,20 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/jard-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="public/jard-light.png">
+  <img src="public/jard-light.png" alt="Jaro logo" width="96" height="96">
+</picture>
+
 # Jaro — By Jard
 
 Jaro is a local audio app for Mac. Dictate into the app you’re already using, record meetings, or transcribe an audio file. Transcription runs on your Mac.
 
-**[Download for Mac](https://github.com/AdamGera/Jaro/releases/latest/download/Jard-Soundfolio-Local-arm64.dmg)** · Apple Silicon · macOS 26 or later
+**[Download for Mac](https://github.com/AdamGera/Jaro/releases/latest)** · [GitHub repository](https://github.com/AdamGera/Jaro) · Apple Silicon · macOS 26 or later
 
 ## Meetings
 
 Record your microphone, Mac audio, or both. You can also open a recording you already have.
 
-![Illustrated dark-mode demo. Open a saved session from Home, read its overview, jump through timeline chapters, follow the transcript, and explore each speaker’s activity.](docs/media/soundfolio-demo.gif)
+![Illustrated dark-mode demo. Open a saved session from Home, read its overview, jump through timeline chapters, follow the transcript, and explore each speaker’s activity.](docs/media/meeting-demo.gif)
 
 Open **Overview** for an editable summary or **Timeline** to jump to a topic. Search the **Transcript** and click a timestamp to hear that moment. **Speaker analytics** shows when each person spoke and their share of speaking time.
 

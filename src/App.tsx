@@ -49,7 +49,7 @@ function message(error: unknown) {
 export default function App() {
   const [quitting, setQuitting] = useState(false)
   return quitting
-    ? <main className="quit-screen" role="status"><h1>Jard Soundfolio Local is shutting down.</h1><p>{desktopBridge() ? "You can close this window." : "You can close this tab."}</p></main>
+    ? <main className="quit-screen" role="status"><h1>Jaro is shutting down.</h1><p>{desktopBridge() ? "You can close this window." : "You can close this tab."}</p></main>
     : <Workspace onQuit={() => setQuitting(true)} />
 }
 
@@ -125,7 +125,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     async function check() {
       try {
         const response = await fetch("/api/status", { cache: "no-store", signal: abort.signal })
-        if (!response.ok) throw new Error("Jard Soundfolio Local is unavailable.")
+        if (!response.ok) throw new Error("Jaro is unavailable.")
         const update: { status: ModelStatus; languages?: Language[]; diarization?: boolean } = await response.json()
         if (abort.signal.aborted) return
         if (update.status === "ready" && update.languages) setLanguageOptions(update.languages)
@@ -653,7 +653,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
             <source media="(prefers-color-scheme: dark)" srcSet="/jard-dark.png" />
             <img className="wordmark-icon" src="/jard-light.png" width="40" height="40" alt="" />
           </picture>
-          <span className="wordmark-text">Jard Soundfolio Local</span>
+          <span className="wordmark-text">Jaro</span>
         </div>
         <nav className="workspace-actions" aria-label="Session actions">
           {viewingSession && <Downloads item={current} compact />}
@@ -718,7 +718,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
           </div>}
           {(feedback || status === "error") && (
             <p className="feedback" role="alert">
-              {feedback || "Jard Soundfolio Local could not start. Check the launcher, then reload this page."}
+              {feedback || "Jaro could not start. Check the launcher, then reload this page."}
             </p>
           )}
           <div className="transcription-options">

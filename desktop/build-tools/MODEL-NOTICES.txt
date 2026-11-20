@@ -1,4 +1,4 @@
-Jard Soundfolio Local model acknowledgments
+Jaro model acknowledgments
 
 The app downloads model data on request. Each file's exact revision, source URL and SHA-256 digest is recorded in models.json beside the setup program.
 

@@ -12,7 +12,7 @@
 - (void)showError:(NSString *)message {
     [NSApp activateIgnoringOtherApps:YES];
     NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Jard Soundfolio Local Launcher";
+    alert.messageText = @"Jaro Launcher";
     alert.informativeText = message;
     [alert runModal];
 }
@@ -20,21 +20,21 @@
 - (BOOL)applicationOpenUntitledFile:(NSApplication *)sender {
     NSURL *page = [self.folder URLByAppendingPathComponent:@"README.html"];
     if (![NSWorkspace.sharedWorkspace openURL:page]) {
-        [self showError:@"Keep Jard Soundfolio Local Launcher in the same folder as README.html."];
+        [self showError:@"Keep Jaro Launcher in the same folder as README.html."];
     }
     [NSApp terminate:nil];
     return YES;
 }
 
 - (void)application:(NSApplication *)sender openURLs:(NSArray<NSURL *> *)urls {
-    NSDictionary *commands = @{@"setup": @"Setup Jard Soundfolio Local.command",
-                               @"start": @"Start Jard Soundfolio Local.command",
-                               @"quit": @"Quit Jard Soundfolio Local.command"};
+    NSDictionary *commands = @{@"setup": @"Setup Jaro.command",
+                               @"start": @"Start Jaro.command",
+                               @"quit": @"Quit Jaro.command"};
     NSString *page = [[self.folder URLByAppendingPathComponent:@"README.html"] URLByResolvingSymlinksInPath].path;
     for (NSURL *url in urls) {
         NSURLComponents *parts = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
         NSString *command = parts.host ? commands[parts.host] : nil;
-        BOOL knownScheme = [parts.scheme isEqualToString:@"jard-soundfolio-local"] || [parts.scheme isEqualToString:@"jard-audio"];
+        BOOL knownScheme = [@[@"jaro", @"jard-soundfolio-local", @"jard-audio"] containsObject:parts.scheme ?: @""];
         if (!knownScheme || !command) continue;
         NSURLQueryItem *source = parts.queryItems.firstObject;
         // A link from a different checkout must never run this checkout's commands.
@@ -42,7 +42,7 @@
             [source.value.stringByResolvingSymlinksInPath.precomposedStringWithCanonicalMapping
                 isEqualToString:page.precomposedStringWithCanonicalMapping];
         if (!fromPage) {
-            [self showError:@"Open Jard Soundfolio Local Launcher in the same folder as your welcome page."];
+            [self showError:@"Open Jaro Launcher in the same folder as your welcome page."];
             break;
         }
         NSURL *file = [self.folder URLByAppendingPathComponent:command];

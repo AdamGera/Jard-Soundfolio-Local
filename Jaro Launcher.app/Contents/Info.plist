@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>local.jardaudio.welcome</string>
-  <key>CFBundleName</key><string>Jard Soundfolio Local Launcher</string>
+  <key>CFBundleName</key><string>Jaro Launcher</string>
   <key>CFBundleExecutable</key><string>JardLauncher</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>0.0.5</string>
@@ -10,7 +10,7 @@
   <key>LSUIElement</key><true/>
   <key>CFBundleURLTypes</key><array><dict>
     <key>CFBundleURLName</key><string>local.jardaudio.welcome.controls</string>
-    <key>CFBundleURLSchemes</key><array><string>jard-soundfolio-local</string><string>jard-audio</string></array>
+    <key>CFBundleURLSchemes</key><array><string>jaro</string><string>jard-soundfolio-local</string><string>jard-audio</string></array>
     <key>CFBundleTypeRole</key><string>Viewer</string>
   </dict></array>
 </dict></plist>

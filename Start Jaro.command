@@ -3,7 +3,7 @@ set -e
 cd -- "$(dirname -- "$0")"
 export PATH="/opt/homebrew/bin:$PATH"
 if [[ ! -x .venv/bin/python ]]; then
-  echo "Run Setup Jard Soundfolio Local.command once to prepare Jard Soundfolio Local."
+  echo "Run Setup Jaro.command once to prepare Jaro."
   exit 1
 fi
 if [[ $# -eq 0 ]]; then

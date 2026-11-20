@@ -118,7 +118,7 @@ def language_prompt(language_codes: tuple[str, ...]) -> str | None:
 class RumbleModel:
     def __init__(self):
         if not all((MODEL_DIR / name).is_file() for name in MODEL_FILES):
-            raise RuntimeError("Run Setup Jard Soundfolio Local to install the local model.")
+            raise RuntimeError("Run Setup Jaro to install the local model.")
         if (MODEL_DIR / "revision").read_text().strip() != REVISION:
             raise RuntimeError("The local checkpoint revision does not match.")
 

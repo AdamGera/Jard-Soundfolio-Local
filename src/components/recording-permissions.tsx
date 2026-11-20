@@ -106,8 +106,8 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
     })}</div>
     {(settings || !granted || refusedSource) && <details className="recording-access-help">
       <summary>Jard isn’t listed in System Settings</summary>
-      <p>Open Jard Soundfolio Local.app from Finder and press Record to register its request. If macOS asks you to quit and reopen Jard, do that before checking again.</p>
-      {sources.includes("mic") && <p>Under Privacy &amp; Security → Microphone, macOS lists apps after they request access. Turn on Jard Soundfolio Local. A restricted Mac may need an administrator.</p>}
+      <p>Open Jaro.app from Finder and press Record to register its request. If macOS asks you to quit and reopen Jaro, do that before checking again.</p>
+      {sources.includes("mic") && <p>Under Privacy &amp; Security → Microphone, macOS lists apps after they request access. Turn on Jaro. A restricted Mac may need an administrator.</p>}
       {permissions.mic === "denied" && <div className="recording-access-reset">
         <p>If Jard is still missing from Microphone after reopening, copy this command, quit Jard, then run it in Terminal. It clears only Jard’s microphone decision. Reopen Jard and press Record for a fresh macOS prompt.</p>
         <code>{resetMicrophone}</code>
@@ -117,7 +117,7 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
       </div>}
       {sources.includes("system") && <><p>Under Privacy &amp; Security → Screen &amp; System Audio Recording, turn on Jard. If it is missing, use the add (+) button when available and select the app shown in Finder.</p>
         <div className="recording-access-links">
-          <button type="button" disabled={busy} onClick={() => void native.request("revealApp").catch(() => setMessage("Locate Jard Soundfolio Local.app in Finder."))}>Show this app in Finder</button>
+          <button type="button" disabled={busy} onClick={() => void native.request("revealApp").catch(() => setMessage("Locate Jaro.app in Finder."))}>Show this app in Finder</button>
           {(permissions.system === "denied" || refusedSource === "system") && <button type="button" disabled={busy} onClick={() => void request("system")}>Request Mac audio access again</button>}
         </div></>}
     </details>}
@@ -144,7 +144,7 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
         }}>
         <Dialog.Title>{inspection ? "Recording access" : "Allow recording on this Mac"}</Dialog.Title>
         <Dialog.Description>{refusedSource ?
-          "macOS refused " + (refusedSource === "system" ? "Mac audio capture" : "microphone capture") + ". Check Jard Soundfolio Local in Privacy & Security, then retry." :
+          "macOS refused " + (refusedSource === "system" ? "Mac audio capture" : "microphone capture") + ". Check Jaro in Privacy & Security, then retry." :
           (inspection ? "Check macOS access for your selected audio sources." : "Check access for the audio sources you selected.")}</Dialog.Description>
         {controls}
         <div className="recording-access-footer"><Button ref={cancel} variant="ghost" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>

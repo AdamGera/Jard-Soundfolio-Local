@@ -295,7 +295,7 @@ int main(void) {
         signal(SIGPIPE, SIG_IGN);
         NSBundle *bundle = NSBundle.mainBundle;
         NSURL *resources = bundle.resourceURL;
-        NSString *title = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"Jard Soundfolio Local";
+        NSString *title = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"Jaro";
         NSString *identifier = bundle.bundleIdentifier ?: @"local.jardaudio.desktop";
         JardHost *app = [[JardHost alloc] init];
         app.pending = NSMutableDictionary.dictionary;
@@ -311,7 +311,7 @@ int main(void) {
         if (env[@"JARD_TEST_SETUP"]) setupURL = [NSURL fileURLWithPath:env[@"JARD_TEST_SETUP"]];
 #endif
         NSString *setup = [NSString stringWithContentsOfURL:setupURL encoding:NSUTF8StringEncoding error:nil];
-        if (!setup) setup = @"<p>The setup page is missing. Reinstall Jard Soundfolio Local.</p>";
+        if (!setup) setup = @"<p>The setup page is missing. Reinstall Jaro.</p>";
         NSString *version = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"0.0.0";
         app.host = native_sdk_appkit_create(SDK_BYTES(title), SDK_BYTES(title), SDK_BYTES(version),
             SDK_BYTES(@"Private local audio transcription"), 1, 0, 1, SDK_BYTES(title), SDK_BYTES(identifier),

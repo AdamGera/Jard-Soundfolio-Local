@@ -57,11 +57,11 @@ async def load_model(app: FastAPI):
 
             app.state.diarizer = await run_in_threadpool(Diarizer)
         except Exception:
-            logger.exception("Speaker labeling could not start. Run Setup Jard Soundfolio Local to install its models.")
+            logger.exception("Speaker labeling could not start. Run Setup Jaro to install its models.")
         try:
             await run_in_threadpool(app.state.model.enable_alignment)
         except Exception:
-            logger.exception("Word timing could not start. Run Setup Jard Soundfolio Local to install alignment weights.")
+            logger.exception("Word timing could not start. Run Setup Jaro to install alignment weights.")
         app.state.status = "ready"
 
 
@@ -128,7 +128,7 @@ async def status(request: Request, challenge: str = Query("", max_length=64)):
 
 def check_client(request):
     if request.headers.get("origin", URL) != URL:
-        raise HTTPException(403, "Open Jard Soundfolio Local on this Mac.")
+        raise HTTPException(403, "Open Jaro on this Mac.")
 
 
 @app.post("/api/clients/{key}", status_code=204)
@@ -158,7 +158,7 @@ async def connect_browser(key: UUID, request: Request):
         try:
             while True:
                 leases.renew(str(key))
-                yield ": Jard Soundfolio Local connected\n\n"
+                yield ": Jaro connected\n\n"
                 await asyncio.sleep(20)
         finally:
             leases.streams.discard(connection)
@@ -169,7 +169,7 @@ async def connect_browser(key: UUID, request: Request):
 @app.post("/api/quit")
 async def quit_app(request: Request):
     if request.headers.get("origin") != URL or request.headers.get("x-jard-action") != "quit":
-        raise HTTPException(403, "Quit from the local Jard Soundfolio Local app.")
+        raise HTTPException(403, "Quit from the local Jaro app.")
     return Response(status_code=202, background=BackgroundTask(os.kill, os.getpid(), signal.SIGTERM))
 
 
@@ -200,7 +200,7 @@ def session_audio(request: Request, key: UUID):
 @app.delete("/api/sessions/{key}")
 def delete_session(request: Request, key: UUID):
     if request.headers.get("origin", URL) != URL:
-        raise HTTPException(403, "Open Jard Soundfolio Local from its local launcher.")
+        raise HTTPException(403, "Open Jaro from its local launcher.")
     try:
         request.app.state.library.delete(str(key))
     except ValueError as error:
@@ -210,7 +210,7 @@ def delete_session(request: Request, key: UUID):
 
 def check_audio_request(request: Request):
     if request.headers.get("origin", URL) != URL:
-        raise HTTPException(403, "Open Jard Soundfolio Local from its local launcher.")
+        raise HTTPException(403, "Open Jaro from its local launcher.")
     if request.headers.get("content-type") != "application/octet-stream":
         raise HTTPException(415, "Expected audio bytes.")
 
@@ -415,7 +415,7 @@ async def accept_audio(request, source, name, mime, languages, recording, diariz
             request.app.state.insights.wake.set()
             emit(done=True, duration=samples / SAMPLE_RATE)
         except asyncio.CancelledError:
-            library.finish(key, "Processing stopped when Jard Soundfolio Local closed.")
+            library.finish(key, "Processing stopped when Jaro closed.")
             raise
         except Exception as error:
             logger.exception("Could not complete session %s.", key)
@@ -453,7 +453,7 @@ def check_native(request):
     check_client(request)
     token = request.headers.get("x-jard-token", "")
     if not hmac.compare_digest(request.app.state.native_token.encode(), token.encode()):
-        raise HTTPException(403, "Open Jard Soundfolio Local on this Mac to access desktop staging.")
+        raise HTTPException(403, "Open Jaro on this Mac to access desktop staging.")
 
 
 @app.post("/api/native/staging", status_code=201)
@@ -617,7 +617,7 @@ async def preview_stage(request: Request, key: UUID, start: int = Query(ge=0, le
 
 
 def start_in_background(*, open_page: bool):
-    directory = Path(os.environ.get("RUMBLE_LOG_DIR") or Path.home() / "Library/Logs/Jard Soundfolio Local")
+    directory = Path(os.environ.get("RUMBLE_LOG_DIR") or Path.home() / "Library/Logs/Jaro")
     directory.mkdir(parents=True, exist_ok=True)
     log = directory / "server.log"
     with startup_lock():
@@ -637,14 +637,14 @@ def start_in_background(*, open_page: bool):
                     if process.poll() is not None:
                         raise
                 if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError(f"Jard Soundfolio Local could not start. See {log}")
+                    raise RuntimeError(f"Jaro could not start. See {log}")
                 time.sleep(0.15)
     if open_page:
         webbrowser.open(URL)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Jard Soundfolio Local locally.")
+    parser = argparse.ArgumentParser(description="Run Jaro locally.")
     parser.add_argument("--setup-model", action="store_true")
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--ensure", action="store_true", help="Attach to or start the shared engine.")
@@ -656,7 +656,7 @@ def main():
         prepare_model()
         return
     if not (DIST / "index.html").is_file():
-        parser.error("Run Setup Jard Soundfolio Local to build the browser interface.")
+        parser.error("Run Setup Jaro to build the browser interface.")
 
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -684,7 +684,7 @@ def main():
         try:
             listener.bind((HOST, PORT))
         except OSError as error:
-            parser.exit(1, f"Cannot start Jard Soundfolio Local at {URL}: {error}\n")
+            parser.exit(1, f"Cannot start Jaro at {URL}: {error}\n")
         if not args.no_open and not args.serve:
             def open_when_ready():
                 while not server.started and not server.should_exit:

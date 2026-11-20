@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build (or repackage) Jard Soundfolio Local using only pinned inputs and macOS build tools."""
+"""Build (or repackage) Jaro using only pinned inputs and macOS build tools."""
 import argparse
 import hashlib
 import json
@@ -210,7 +210,7 @@ def main():
     # Build entirely in staging so a compile or signing failure preserves the previous app.
     with tempfile.TemporaryDirectory(dir=OUT, prefix=".package-") as stage:
         stage = Path(stage)
-        app = stage / "Jard Soundfolio Local.app"
+        app = stage / "Jaro.app"
         run("native", "package", "--target", "macos", "--signing", "none", "--binary", DESKTOP / "zig-out/bin/jard-soundfolio-local", "--output", app, cwd=DESKTOP)
         assemble(app)
         if opts.publisher_identity:
@@ -222,10 +222,10 @@ def main():
         if opts.update_key:
             with (app / "Contents/Info.plist").open("rb") as stream:
                 version = plistlib.load(stream)["CFBundleVersion"]
-            archive = stage / "Jard-Soundfolio-Local-arm64.zip"
+            archive = stage / "Jaro-arm64.zip"
             # The installer expects exactly one top-level .app, including its symlinks and executable modes.
             run("ditto", "-c", "-k", "--norsrc", "--keepParent", app, archive)
-            url = f"https://github.com/AdamGera/Jard-Soundfolio-Local/releases/download/v{version}/{archive.name}"
+            url = f"https://github.com/AdamGera/Jaro/releases/download/v{version}/{archive.name}"
             feed = stage / "native-update.json"
             run("native", "update", "sign", "--manifest", DESKTOP / "app.json",
                 "--target", "macos-aarch64", "--archive", archive, "--url", url,
@@ -233,18 +233,18 @@ def main():
         if opts.dmg or opts.notary_profile:
             image_root = stage / "image"
             image_root.mkdir()
-            image_app = image_root / "Jard Soundfolio Local.app"
+            image_app = image_root / "Jaro.app"
             app.rename(image_app)
             app = image_app
             (image_root / "Applications").symlink_to("/Applications")
-            image = stage / "Jard Soundfolio Local.dmg"
-            run("hdiutil", "create", "-srcfolder", image_root, "-volname", "Jard Soundfolio Local", "-format", "UDZO", image)
+            image = stage / "Jaro-arm64.dmg"
+            run("hdiutil", "create", "-srcfolder", image_root, "-volname", "Jaro", "-format", "UDZO", image)
             if opts.identity != "-":
                 run("codesign", "--sign", opts.identity, "--timestamp", image)
             if opts.notary_profile:
                 notarize(image, opts.notary_profile)
             image.replace(OUT / image.name)
-        output = OUT / "Jard Soundfolio Local.app"
+        output = OUT / "Jaro.app"
         if output.exists():
             output.rename(stage / "previous.app")
         app.rename(output)

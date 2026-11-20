@@ -1,4 +1,4 @@
 #!/bin/bash
 set -e
 cd -- "$(dirname -- "$0")"
-exec "./Setup Jard Soundfolio Local.command" "$@"
+exec "./Setup Jaro.command" "$@"

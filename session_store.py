@@ -104,7 +104,7 @@ class SessionStore:
             personal_notes.migrate(db)
             db.execute("UPDATE chat_turns SET status='stopped' WHERE status='streaming'")
             db.execute("UPDATE sessions SET status='interrupted',error=? WHERE status='processing'",
-                       ("Processing stopped when Jard Soundfolio Local closed.",))
+                       ("Processing stopped when Jaro closed.",))
             ids = {row[0] for row in db.execute("SELECT id FROM sessions")}
         # Finish filesystem changes interrupted between a rename and a database commit.
         for path in self.audio.iterdir():

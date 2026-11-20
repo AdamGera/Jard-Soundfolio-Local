@@ -72,18 +72,18 @@ def running_engine():
         if info.get("model") != "Reson8/Rumble-2-Flash":
             raise ValueError("unexpected server")
     except (OSError, URLError, ValueError, AttributeError) as error:
-        raise RuntimeError(f"Another application is using {URL}. Close it and reopen Jard Soundfolio Local.") from error
+        raise RuntimeError(f"Another application is using {URL}. Close it and reopen Jaro.") from error
     if info.get("apiVersion") != API_VERSION:
-        raise RuntimeError("Another Jard Soundfolio Local version is running. Quit it, then reopen Jard Soundfolio Local.")
+        raise RuntimeError("Another Jaro version is running. Quit it, then reopen Jaro.")
     root = library_path()
     if info.get("libraryId") != library_id(root):
-        raise RuntimeError("The running Jard Soundfolio Local engine is using a different session library.")
+        raise RuntimeError("The running Jaro engine is using a different session library.")
     try:
         token = (root / ".native-token").read_text().strip()
     except OSError as error:
-        raise RuntimeError("Could not verify the running Jard Soundfolio Local engine.") from error
+        raise RuntimeError("Could not verify the running Jaro engine.") from error
     if not hmac.compare_digest(info.get("proof", ""), engine_proof(token, challenge)):
-        raise RuntimeError("Could not verify the running Jard Soundfolio Local engine.")
+        raise RuntimeError("Could not verify the running Jaro engine.")
     return info
 
 
@@ -111,22 +111,22 @@ class ClientLeases:
 
 def quit_engine():
     if not running_engine():
-        print("Jard Soundfolio Local is already stopped.")
+        print("Jaro is already stopped.")
         return
     request = Request(URL + "/api/quit", method="POST", headers={"Origin": URL, "X-Jard-Action": "quit"})
     with urlopen(request, timeout=3) as response:
         if response.status != 202:
-            raise RuntimeError("Jard Soundfolio Local could not quit.")
+            raise RuntimeError("Jaro could not quit.")
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
             with socket.create_connection((HOST, PORT), timeout=0.2):
                 pass
         except OSError:
-            print("Jard Soundfolio Local has quit.")
+            print("Jaro has quit.")
             return
         time.sleep(0.15)
-    raise RuntimeError("Jard Soundfolio Local is still finishing its shutdown.")
+    raise RuntimeError("Jaro is still finishing its shutdown.")
 
 
 if __name__ == "__main__":

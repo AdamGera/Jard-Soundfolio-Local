@@ -51,6 +51,6 @@ python3 desktop/build-tools/package.py --dmg \
   --notes "Describe what changed in this version."
 ```
 
-Create a draft GitHub release tagged `v<version>` at the build commit. Attach the DMG as `Jard-Soundfolio-Local-arm64.dmg`, the matching source as `Jard-Soundfolio-Local-native-source.zip`, and both generated update files, `Jard-Soundfolio-Local-arm64.zip` and `native-update.json`. Publish it as the latest stable release once all four assets are present. The app reads the feed from the latest release and downloads the version-specific ZIP only after the user chooses to install. Leave the assets at their published URLs.
+Create a draft GitHub release tagged `v<version>` at the build commit. Attach the DMG as `Jaro-arm64.dmg`, the matching source as `Jaro-native-source.zip`, and both generated update files, `Jaro-arm64.zip` and `native-update.json`. Publish it as the latest stable release once all four assets are present. The app reads the feed from the latest release and downloads the version-specific ZIP only after the user chooses to install. Leave the assets at their published URLs.
 
 Forks distributing their own builds should generate their own key with `native update keygen --private-key /private/path/native-update.key` and configure their public key and release URLs before shipping.

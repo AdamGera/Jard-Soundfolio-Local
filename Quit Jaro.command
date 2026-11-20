@@ -3,7 +3,7 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")"
 
 if [[ -t 0 ]]; then
-  read -r -p "Quit Jard Soundfolio Local Everywhere? This stops active jobs for the Mac app and all browser tabs. [y/N] " answer
+  read -r -p "Quit Jaro Everywhere? This stops active jobs for the Mac app and all browser tabs. [y/N] " answer
   case "$answer" in y|Y|yes|YES) ;; *) exit 0 ;; esac
 fi
 
@@ -26,15 +26,15 @@ if [[ -f "$lock" ]]; then
       *) continue ;;
     esac
 
-    echo "Quitting Jard Soundfolio Local…"
+    echo "Quitting Jaro…"
     if ! kill -TERM "$pid" 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
-      echo "Could not stop Jard Soundfolio Local." >&2
+      echo "Could not stop Jaro." >&2
       exit 1
     fi
     while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
-    echo "Jard Soundfolio Local has quit."
+    echo "Jaro has quit."
     exit 0
   done
 fi
-echo "Could not find a matching Jard Soundfolio Local engine. Close its original launcher and try again."
+echo "Could not find a matching Jaro engine. Close its original launcher and try again."
 exit 1

@@ -34,7 +34,7 @@ def read_wav_header(stream):
     if (len(header) != 44 or header[:4] != b"RIFF" or header[8:16] != b"WAVEfmt "
             or struct.unpack_from("<IHHIIHH", header, 16) != (16, 1, 1, 48_000, 96_000, 2, 16)
             or header[36:40] != b"data"):
-        raise ValueError("This draft needs a 48 kHz mono PCM recording made by Jard Soundfolio Local.")
+        raise ValueError("This draft needs a 48 kHz mono PCM recording made by Jaro.")
 
 
 def recover_wav(path):

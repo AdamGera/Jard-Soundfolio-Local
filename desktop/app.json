@@ -1,7 +1,7 @@
 {
   "id": "local.jardaudio.desktop",
   "name": "jard-soundfolio-local",
-  "display_name": "Jard Soundfolio Local",
+  "display_name": "Jaro",
   "description": "Your recordings, transcripts, and notes stay on your Mac.",
   "version": "0.0.6",
   "platforms": [
@@ -35,7 +35,7 @@
   "windows": [
     {
       "label": "main",
-      "title": "Jard Soundfolio Local",
+      "title": "Jaro",
       "width": 1050,
       "height": 760,
       "titlebar": "hidden_inset_tall",
@@ -43,7 +43,7 @@
     }
   ],
   "updates": {
-    "feed_url": "https://github.com/AdamGera/Jard-Soundfolio-Local/releases/latest/download/native-update.json",
+    "feed_url": "https://github.com/AdamGera/Jaro/releases/latest/download/native-update.json",
     "public_key": "dxMjVxu9nD8oMW/Cx+DNTJ2sYv8JS8z95lJkz63hBMM=",
     "check_on_start": true
   }

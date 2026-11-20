@@ -23,6 +23,6 @@ int main(int argc, char **argv) {
     args[3] = is_client ? "ui" : "engine";
     for (int n = 1; n < argc; n++) args[n + 3] = argv[n];
     execv(python, args);
-    perror("Jard Soundfolio Local runtime");
+    perror("Jaro runtime");
     return 1;
 }

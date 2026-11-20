@@ -398,4 +398,4 @@ def render(output):
 
 
 if __name__ == "__main__":
-    render(ROOT / "docs/media/soundfolio-demo.gif")
+    render(ROOT / "docs/media/meeting-demo.gif")

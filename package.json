@@ -1,5 +1,5 @@
 {
-  "name": "jard-soundfolio-local",
+  "name": "jaro",
   "private": true,
   "version": "0.0.6",
   "type": "module",
@@ -57,6 +57,6 @@
   "homepage": "https://www.jard.ai/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AdamGera/Jard-Soundfolio-Local.git"
+    "url": "https://github.com/AdamGera/Jaro.git"
   }
 }

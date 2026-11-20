@@ -665,7 +665,7 @@ wheels = [
 ]
 
 [[package]]
-name = "jard-soundfolio-local"
+name = "jaro"
 version = "0.0.6"
 source = { virtual = "." }
 dependencies = [
