@@ -16,9 +16,9 @@ Type or dictate in **My Notes** to add context, then choose **Update overview** 
 
 ## System Dictation
 
-Use your voice wherever you can type, from a code editor to a browser. The demo shows a preview of System Dictation.
+Use your voice to write a code comment, give a coding agent a task, or reply in a chat. The demo shows a preview of System Dictation.
 
-![Illustrated macOS demo. Hold Right Option and speak, then release to insert a comment in a code editor and a search term in a browser.](docs/media/dictation-demo.gif)
+![Illustrated macOS demo. Hold the right Option key ⌥, speak, then release to insert a code comment, an agent prompt, or a chat reply at the cursor.](docs/media/dictation-demo.gif)
 
 1. Open **Settings → System Dictation** and allow **Microphone** and **Accessibility** access.
 2. With Jaro running, click where you want the text to go. Hold **Right Option** and speak.
