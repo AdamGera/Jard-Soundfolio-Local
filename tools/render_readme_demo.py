@@ -68,6 +68,7 @@ def font(size, weight="regular"):
     names = {
         "regular": ("/System/Library/Fonts/HelveticaNeue.ttc", "DejaVuSans.ttf"),
         "bold": ("/System/Library/Fonts/HelveticaNeue.ttc", "DejaVuSans-Bold.ttf"),
+        "mono": ("/System/Library/Fonts/Menlo.ttc", "DejaVuSansMono.ttf"),
         "serif": ("/System/Library/Fonts/Supplemental/Georgia.ttf", "DejaVuSerif.ttf"),
     }
     for name in names[weight]:
