@@ -1,292 +1,290 @@
-"""Draw Jaro's System Dictation walkthrough with fictional text.
+"""Draw Jaro's four System Dictation examples with original artwork and fictional text.
 
 Run with: uv run --no-project --with pillow==13.0.0 python tools/render_dictation_demo.py
 """
 
+from dataclasses import dataclass
 from functools import lru_cache
-from math import cos, exp, sin
+from math import cos, exp, pi, sin
+from random import Random
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-from render_readme_demo import (
-    BG, BLUE, EDGE, FRAME_MS, INK, LAVENDER, MUTED, PANEL, PURPLE_BG, QUIET, ROOT,
-    SIDEBAR, SIZE, WINDOW, Canvas, blend_points, cursor,
-)
+from render_readme_demo import FRAME_MS, ROOT, SCALE, SIZE, Canvas, blend_points, cursor, px
 
-FOCUS = 0.96
-HOLD = 1.76
-RELEASE = 4.16
-INSERT = 5.12
-DURATION = 7.52
-TRAFFIC_LIGHTS = ("#ee696c", "#e4b458", "#68bc80")
-CHAT_ACCENT = "#7cdbaf"
-
-
-def indicator(canvas, time):
-    # Illustrate the native indicator's warm recording and cool processing dot patterns.
-    age = time - HOLD
-    after_insert = max(0, time - INSERT)
-    cool = min(1, max(0, (time - RELEASE) / 0.30))
-    visibility = min(1, age / 0.32) * max(0, 1 - after_insert / 0.40)
-    width = (112 - 36 * cool) * (0.38 + 0.62 * visibility)
-    center_x, center_y = 480, 66
-    canvas.box((center_x - width / 2, 53, center_x + width / 2, 79), BG, 13, EDGE)
-    for column in range(-21, 22):
-        x = column * 2.6
-        if abs(x) > width / 2 - 5:
-            continue
-        phase = column * (0.28 + 0.15 * cool) + age * (7 + 3 * cool)
-        amplitude = (2.2 + 5 * abs(sin(age * 6.2) * cos(age * 2.6))) * (1 - 0.60 * cool)
-        strands = (amplitude * sin(phase), amplitude * cos(phase * 1.19))
-        for row in range(-4, 5):
-            y = row * 2.6
-            if max(0, abs(x) - width / 2 + 13) ** 2 + y ** 2 > 11 ** 2:
-                continue
-            distance = min(abs(y - strand) for strand in strands)
-            light = visibility * exp(-0.55 * distance) * (0.58 + 0.42 * abs(cos(phase + row)))
-            pearl = (248 - 31 * cool, 244 - 10 * cool, 231 + 24 * cool)
-            color = tuple(round(base + (tip - base) * light) for base, tip in zip((39, 39, 45), pearl))
-            canvas.dot(center_x + x, center_y + y, 0.55 + 0.47 * light, color)
+INK = "#242333"
+WHITE = "#fffdfa"
+PAPER = "#f8f5f0"
+MUTED = "#6c6877"
+EDGE = "#e4dfdf"
+HUD = "#15151d"
+FRAME = (12, 12, 948, 564)
+WINDOW = (385, 96, 886, 456)
+FOCUS, HOLD, RELEASE, INSERT = 0.80, 1.28, 3.68, 4.48
+DURATION, FADE = 6.96, 0.40
 
 
-@lru_cache(maxsize=1)
-def desktop_background():
-    canvas = Canvas()
-    canvas.box((13, 15, 947, 562), "#252536", 18, EDGE)
-    canvas.box((15, 47, 945, 560), "#272738", 16)
-    canvas.poly(((15, 335), (322, 49), (934, 49), (556, 560), (15, 560)), "#2c293d")
-    canvas.poly(((270, 560), (648, 49), (936, 49), (945, 66), (945, 545), (929, 560)), "#2b3044")
-    canvas.poly(((616, 560), (936, 175), (945, 167), (945, 545), (929, 560)), "#31384d")
-    canvas.box((14, 16, 946, 49), "#1a1a26", 13)
-    canvas.box((14, 36, 946, 49), "#1a1a26")
-    canvas.line(((15, 49), (945, 49)), "#39384a", 1)
-    return canvas.image
-
-
-def desktop(canvas, app):
-    canvas.image.paste(desktop_background())
-    canvas.dot(36, 33, 5, LAVENDER)
-    canvas.text(52, 33, app, 14, INK, "bold")
-    menu_x = 78 + canvas.width(app, 14, "bold")
-    canvas.text(menu_x, 33, "File     Edit     View     Window", 13, QUIET)
-    canvas.box((815, 28, 834, 38), None, 2, QUIET)
-    canvas.box((818, 30, 830, 36), QUIET, 1)
-    canvas.line(((837, 31), (837, 35)), QUIET)
-    canvas.text(923, 33, "Fri  10:24", 13, QUIET, anchor="rm")
-
-
-def window_frame(canvas, title, surface=WINDOW):
-    canvas.box((101, 100, 859, 459), "#161620", 18)
-    canvas.box((96, 93, 855, 450), surface, 16, EDGE)
-    for x, color in zip((119, 138, 157), TRAFFIC_LIGHTS):
-        canvas.dot(x, 115, 4.5, color)
-    canvas.text(475, 116, title, 14, QUIET, "bold", anchor="mm")
-    canvas.line(((97, 137), (854, 137)), EDGE, 1)
-
-
-def insertion(canvas, x, y, phrase, time, size, weight, color):
-    if time >= INSERT:
-        end = x + canvas.width(phrase, size, weight)
-        if time < INSERT + 0.48:
-            canvas.box((x - 3, y - 13, end + 3, y + 13), PURPLE_BG, 4)
-        canvas.text(x, y, phrase, size, color, weight)
-        x = end
-    if time >= FOCUS and (int((time - FOCUS) / 0.48) % 2 == 0 or INSERT <= time < INSERT + 0.48):
-        canvas.line(((x, y - 12), (x, y + 12)), LAVENDER, 1.5)
-
-
-def editor(canvas, phrase, time):
-    window_frame(canvas, "weather-tool  /  main")
-    canvas.box((97, 139, 245, 424), SIDEBAR, 4)
-    canvas.line(((245, 138), (245, 424)), EDGE, 1)
-    canvas.text(114, 161, "EXPLORER", 11, MUTED, "bold")
-    canvas.icon("folder", 112, 178)
-    canvas.text(134, 186, "weather-tool", 13, QUIET, "bold")
-    canvas.icon("folder", 125, 204)
-    canvas.text(147, 212, "src", 13, QUIET)
-    canvas.box((105, 224, 238, 249), PURPLE_BG, 5)
-    canvas.text(143, 237, "weather.py", 13, LAVENDER)
-    for y, label in ((265, "client.py"), (291, "README.md")):
-        canvas.text(143, y, label, 13, QUIET)
-
-    canvas.box((246, 140, 667, 175), PANEL, 4)
-    canvas.line(((246, 174), (666, 174)), EDGE, 1)
-    canvas.line(((246, 141), (356, 141)), LAVENDER, 2)
-    canvas.text(262, 157, "weather.py", 13, INK)
-    canvas.text(372, 157, "client.py", 13, MUTED)
-    canvas.text(261, 193, "src  /  weather.py", 12, QUIET)
-    for number, y in enumerate((220, 249, 278, 307, 336, 365), 1):
-        canvas.text(278, y, str(number), 12, MUTED, "mono", "rm")
-    canvas.text(296, 220, "from .client import Client", 15, LAVENDER, "mono")
-    canvas.text(296, 278, "def", 15, LAVENDER, "mono")
-    canvas.text(332, 278, "report(city: str):", 15, INK, "mono")
-    if time >= FOCUS:
-        canvas.box((286, 293, 658, 321), PANEL, 4)
-    canvas.text(332, 307, "#", 15, BLUE, "mono")
-    insertion(canvas, 350, 307, phrase, time, 15, "mono", BLUE)
-    canvas.text(332, 336, "client = Client()", 15, INK, "mono")
-    canvas.text(332, 365, "return client.forecast(city)", 15, INK, "mono")
-
-    canvas.line(((667, 138), (667, 424)), EDGE, 1)
-    canvas.icon("chat", 681, 154, LAVENDER)
-    canvas.text(704, 162, "Assistant", 13, INK, "bold")
-    canvas.box((678, 188, 841, 269), PANEL, 7, EDGE)
-    canvas.text(690, 209, "Context", 12, INK)
-    canvas.icon("transcript", 689, 229)
-    canvas.text(713, 237, "weather.py", 12, QUIET)
-    canvas.line(((97, 424), (854, 424)), EDGE, 1)
-    canvas.text(115, 437, "main", 11, QUIET, "mono")
-    canvas.text(833, 437, "Python   UTF-8", 11, QUIET, "mono", "rm")
-
-
-def send_icon(canvas, x, y, color):
-    canvas.line(((x, y + 6), (x, y - 5)), color, 1.8)
-    canvas.line(((x - 5, y), (x, y - 5), (x + 5, y)), color, 1.8)
-
-
-def agent(canvas, phrase, time):
-    window_frame(canvas, "Agent Workspace", "#1c202c")
-    canvas.text(120, 161, "weather-tool", 14, INK, "bold")
-    canvas.box((221, 150, 284, 172), "#2b3142", 6)
-    canvas.text(252, 161, "main", 11, QUIET, "mono", "mm")
-    canvas.line(((97, 181), (854, 181)), EDGE, 1)
-    canvas.box((644, 182, 854, 449), "#232837", 11)
-    canvas.line(((644, 182), (644, 448)), EDGE, 1)
-    canvas.text(663, 205, "Project tasks", 13, INK, "bold")
-    canvas.box((656, 226, 842, 259), "#333b50", 6)
-    for y, name in ((243, "Forecast retries"), (281, "Check response cache"), (315, "Update example config")):
-        canvas.dot(670, y, 3, LAVENDER if y == 243 else MUTED)
-        canvas.text(682, y, name, 13, QUIET)
-
-    canvas.text(122, 212, "Forecast retries", 22, INK, "bold")
-    canvas.box((188, 239, 619, 274), "#303952", 8)
-    canvas.text(201, 257, "Check what happens when a request times out.", 14)
-    canvas.dot(133, 301, 8, "#645c89")
-    canvas.text(150, 301, "The client currently attempts each request once.", 14, QUIET)
-    canvas.box((120, 336, 619, 424), "#272d3e", 11, LAVENDER if time >= FOCUS else EDGE)
-    if time < FOCUS:
-        canvas.text(135, 358, "Add a follow-up…", 15, MUTED)
-    insertion(canvas, 135, 358, phrase, time, 16, "regular", INK)
-    canvas.icon("plus", 135, 392)
-    canvas.text(160, 400, "Local workspace", 12, QUIET)
-    canvas.dot(593, 400, 15, LAVENDER if time >= INSERT else "#404860")
-    send_icon(canvas, 593, 400, BG if time >= INSERT else QUIET)
-
-
-def contact(canvas, x, y, initials, fill):
-    canvas.dot(x, y, 14, fill)
-    canvas.text(x, y, initials, 10, INK, "bold", "mm")
-
-
-def messages(canvas, phrase, time):
-    window_frame(canvas, "Team Chat", "#1d2928")
-    canvas.box((97, 139, 333, 449), "#202d2c", 11)
-    canvas.line(((333, 138), (333, 448)), "#3b4c49", 1)
-    canvas.text(116, 161, "Chats", 16, INK, "bold")
-    canvas.icon("plus", 298, 153, CHAT_ACCENT)
-    canvas.box((109, 183, 320, 229), "#324940", 8)
-    for y, name, initials, color, excerpt in (
-        (206, "Morgan", "M", "#4d6a70", "Can you join the review?"),
-        (258, "Design team", "DT", "#5e5275", "Agenda is ready."),
-        (310, "Sam", "S", "#6c544d", "Thanks for the update."),
-    ):
-        contact(canvas, 132, y, initials, color)
-        canvas.text(156, y - 8, name, 14, INK, "bold")
-        canvas.text(156, y + 9, excerpt, 12, QUIET)
-
-    canvas.box((334, 138, 853, 194), "#293a37")
-    contact(canvas, 358, 165, "M", "#4d6a70")
-    canvas.text(384, 165, "Morgan", 15, INK, "bold")
-    canvas.icon("chat", 809, 157, CHAT_ACCENT)
-    canvas.text(593, 218, "Today", 12, QUIET, anchor="mm")
-    canvas.box((550, 240, 829, 280), "#365447", 11)
-    canvas.text(563, 259, "I saw the design review moved to Friday.", 14)
-    canvas.box((355, 293, 582, 333), "#334341", 11)
-    canvas.text(368, 312, "Can you join the review?", 14)
-    canvas.text(568, 318, "10:23", 10, QUIET, anchor="rm")
-    canvas.icon("plus", 348, 391, CHAT_ACCENT)
-    canvas.box((374, 375, 805, 421), "#263733", 12, CHAT_ACCENT if time >= FOCUS else "#405650")
-    if time < FOCUS:
-        canvas.text(389, 398, "Write a reply…", 15, MUTED)
-    insertion(canvas, 389, 398, phrase, time, 16, "regular", INK)
-    canvas.dot(828, 398, 15, CHAT_ACCENT if time >= INSERT else "#50645c")
-    send_icon(canvas, 828, 398, BG if time >= INSERT else QUIET)
+@dataclass(frozen=True)
+class Scene:
+    app: str
+    headline: tuple[str, str]
+    colors: tuple[str, str, str, str]
+    field: tuple[int, int]
+    body: tuple[str, ...]
 
 
 SCENES = (
-    ("Code Editor", editor, (350, 307), "Retry once if offline."),
-    ("Agent Workspace", agent, (135, 358), "Add a test for a request timeout."),
-    ("Team Chat", messages, (389, 398), "Yes, Friday works for me."),
+    Scene("Email", ("Reply to", "an email."), ("#f2d8aa", "#df8d66", "#b65e53", "#f7e4c4"), (415, 237),
+          ("Hi Mina,", "", "Thursday works for the review. I’ll send", "the updated slides by Wednesday.", "", "Thanks, Jules")),
+    Scene("Slack", ("Share a", "team update."), ("#d7d0eb", "#a194c6", "#7463a5", "#ece4f5"), (430, 325),
+          ("The preview is live. Please try the", "signup flow before standup.")),
+    Scene("Claude", ("Talk through", "a prompt."), ("#edcec8", "#d08c87", "#ab6674", "#f7ded4"), (427, 298),
+          ("Draft a workshop agenda for new designers.", "Include a hands-on exercise and a short", "discussion at the end.")),
+    Scene("Google Docs", ("Get a draft", "started."), ("#c7dfe3", "#80aeb7", "#577d96", "#e3ecea"), (441, 291),
+          ("We’ll test the new signup flow with five", "people this week. Watch where they pause", "and note what they expect to happen next.")),
 )
 
 
-def keyboard(canvas, held):
-    # The highlighted key is physically to the right of the space bar and Command.
-    canvas.box((95, 478, 343, 542), "#101116", 10, "#44454f")
-    for x0, x1 in ((101, 160), (165, 217), (279, 337)):
-        canvas.box((x0, 486, x1, 534), "#30313a", 6, "#4d4e57")
-    canvas.text(191, 519, "command", 9, QUIET, anchor="mm")
-    canvas.box((197, 497, 205, 505), None, 0, QUIET)
-    for x, y in ((195, 495), (207, 495), (195, 507), (207, 507)):
-        canvas.dot(x, y, 2, None, QUIET)
-    canvas.line(((310, 515), (305, 519), (310, 523)), QUIET, 1.5)
-    offset = 2 if held else 0
-    face = "#75749a" if held else "#42434d"
-    canvas.box((222, 489, 274, 536), "#181820", 6)
-    canvas.box((222, 485 + offset, 274, 533 + offset), face, 6, LAVENDER if held else "#62646f")
-    # Draw the legends directly so the keycaps render without platform glyph fallback.
-    y = 494 + offset
-    canvas.line(((253, y), (258, y), (264, y + 10), (269, y + 10)), INK, 1.7)
-    canvas.line(((263, y), (269, y)), INK, 1.7)
-    canvas.text(248, 519 + offset, "option", 11, INK, anchor="mm")
-
-
-def draw_frame(scene, time):
+@lru_cache(maxsize=4)
+def artwork(index):
+    """Make the four paper compositions once. All coordinates and grain are local."""
+    base, middle, dark, light = SCENES[index].colors
     canvas = Canvas()
-    app, draw_app, field, phrase = scene
+    canvas.image.paste(base, (0, 0, *canvas.image.size))
+    if index == 0:
+        # Offset circles cut from saffron and terracotta paper.
+        canvas.dot(878, 537, 381, middle)
+        canvas.dot(878, 537, 286, base)
+        canvas.dot(878, 537, 190, dark)
+        canvas.dot(878, 537, 118, light)
+        canvas.dot(578, 44, 130, light)
+    elif index == 1:
+        # Overlapping diagonal strips on lavender stock.
+        canvas.poly(((333, 576), (818, 0), (958, 0), (476, 576)), middle)
+        canvas.poly(((525, 576), (960, 65), (960, 239), (669, 576)), dark)
+        canvas.poly(((691, 576), (960, 267), (960, 345), (766, 576)), light)
+        canvas.poly(((366, 0), (443, 0), (209, 265)), light)
+    elif index == 2:
+        # A folded fan in dusty rose.
+        for x in range(350, 1470, 96):
+            canvas.poly(((512, 576), (x, 0), (x + 37, 0)), middle)
+        canvas.dot(917, 471, 194, dark)
+        canvas.dot(917, 471, 147, light)
+        canvas.dot(917, 471, 95, middle)
+    else:
+        # Blue-green contours, like a set of sweeping inked lines.
+        canvas.dot(960, 576, 455, light)
+        for radius in reversed(range(110, 449, 32)):
+            canvas.dot(960, 576, radius, middle)
+            canvas.dot(960, 576, radius - 5, light)
+        canvas.poly(((376, 576), (960, 66), (960, 171), (505, 576)), middle)
+        canvas.poly(((826, 576), (960, 447), (960, 576)), dark)
+
+    random = Random(180 + index)
+    grain = Image.frombytes("L", SIZE, bytes(random.randrange(118, 139) for _ in range(SIZE[0] * SIZE[1])))
+    grain = grain.resize(canvas.image.size, Image.Resampling.BILINEAR).convert("RGB")
+    paper = ImageChops.soft_light(canvas.image, grain)
+    mask = Image.new("L", canvas.image.size)
+    ImageDraw.Draw(mask).rounded_rectangle(px(FRAME), radius=28 * SCALE, fill=255)
+    backdrop = Image.new("RGB", canvas.image.size, "#1a1921")
+    backdrop.paste(paper, (0, 0), mask)
+    return backdrop
+
+
+@lru_cache(maxsize=1)
+def shadow():
+    mask = Image.new("L", (SIZE[0] * SCALE, SIZE[1] * SCALE))
+    left, top, right, bottom = WINDOW
+    bounds = (left + 2, top + 12, right + 2, bottom + 16)
+    ImageDraw.Draw(mask).rounded_rectangle(px(bounds), radius=16 * SCALE, fill=90)
+    return mask.filter(ImageFilter.GaussianBlur(18 * SCALE))
+
+
+def window(canvas, title, header=PAPER):
+    canvas.image.paste("#30233d", (0, 0, *canvas.image.size), shadow())
+    canvas.box(WINDOW, WHITE, 17, "#e5dedf")
+    canvas.box((386, 97, 885, 143), header, 16)
+    canvas.box((386, 123, 885, 143), header)
+    canvas.line(((386, 143), (885, 143)), EDGE, 1)
+    for x, color in ((408, "#de8d8a"), (423, "#d8b376"), (438, "#8cb99a")):
+        canvas.dot(x, 120, 4.25, color)
+    canvas.text(635, 121, title, 14, INK, "bold", "mm")
+
+
+def option_key(canvas, x, y, held):
+    offset = 2 if held else 0
+    canvas.box((x, y + 5, x + 62, y + 57), "#55516a", 9)
+    canvas.box((x, y + offset, x + 62, y + 53 + offset), "#48416b" if held else "#2c2939", 9,
+               "#ded9ff" if held else "#676077")
+    symbol_y = y + 10 + offset
+    canvas.line(((x + 33, symbol_y), (x + 38, symbol_y), (x + 44, symbol_y + 10),
+                 (x + 50, symbol_y + 10)), WHITE, 1.7)
+    canvas.line(((x + 44, symbol_y), (x + 50, symbol_y)), WHITE, 1.7)
+    canvas.text(x + 31, y + 38 + offset, "option", 12, WHITE, anchor="mm")
+
+
+def legend(canvas, index, scene, time):
+    canvas.dot(65, 65, 11, None, INK)
+    canvas.dot(69, 61, 1.5, INK)
+    canvas.text(84, 65, "Jaro", 18, INK, "bold")
+    canvas.text(137, 65, "System Dictation", 13, INK)
+
+    width = canvas.width(scene.app, 15, "bold") + 28
+    canvas.box((53, 151, 53 + width, 181), scene.colors[3], 15)
+    canvas.text(67, 166, scene.app, 15, INK, "bold")
+    canvas.text(51, 225, scene.headline[0], 45, INK, "serif")
+    canvas.text(51, 279, scene.headline[1], 45, INK, "serif")
+
     held = HOLD <= time < RELEASE
-    descriptions = (
-        (f"Click in the {app.lower()}", "Place the cursor where you want to dictate."),
-        ("Hold Right Option and speak", f"“{phrase}”"),
-        ("Release Right Option", "Your Mac turns speech into text."),
-        ("Text inserted at the cursor", "Same shortcut across apps."),
-    )
-    step = sum(time >= boundary for boundary in (HOLD, RELEASE, INSERT))
-    heading, detail = descriptions[step]
-    desktop(canvas, app)
-    draw_app(canvas, phrase, time)
+    if time < FOCUS:
+        action, detail = "Place the cursor", "Click where you want to type."
+    elif time < HOLD:
+        action, detail = "Hold Right Option", "Keep the key down."
+    elif held:
+        action, detail = "Speak naturally", "Hold Right Option while speaking."
+    elif time < INSERT:
+        action, detail = "Release to insert", "Jaro transcribes on your Mac."
+    else:
+        action, detail = "Text inserted", "Your draft stays editable."
+    option_key(canvas, 53, 374, held)
+    canvas.text(131, 390, action, 17, INK, "bold")
+    canvas.text(131, 414, detail, 14, INK)
+    for position in range(len(SCENES)):
+        x = 53 + 38 * position
+        canvas.box((x, 500, x + 30, 504), INK if position == index else scene.colors[1], 2)
 
-    canvas.box((86, 470, 864, 550), "#1b1b25", 14, EDGE)
-    keyboard(canvas, held)
-    canvas.text(366, 495, heading, 19, INK, "bold")
-    canvas.text(366, 521, detail, 15, QUIET)
-    for index, item in enumerate(SCENES):
-        canvas.dot(802 + index * 15, 510, 3, LAVENDER if item == scene else MUTED)
 
-    if HOLD <= time < INSERT + 0.40:
+def draft(canvas, scene, time, placeholder=None, size=18, line_height=24):
+    x, y = scene.field
+    if time >= INSERT:
+        for line in scene.body:
+            canvas.text(x, y, line, size, INK)
+            y += line_height
+        y -= line_height
+        x += canvas.width(scene.body[-1], size)
+    elif placeholder and time < FOCUS:
+        canvas.text(x, y, placeholder, size, MUTED)
+    if time >= FOCUS and (time >= INSERT or int((time - FOCUS) / 0.48) % 2 == 0):
+        canvas.line(((x, y - 11), (x, y + 11)), "#605394", 1.6)
+
+
+def button(canvas, x, y, label, fill="#4a416e"):
+    width = canvas.width(label, 13, "bold") + 26
+    canvas.box((x, y - 14, x + width, y + 14), fill, 7)
+    canvas.text(x + width / 2, y, label, 13, WHITE, "bold", "mm")
+
+
+def email(canvas, scene, time):
+    window(canvas, "Reply")
+    for y, label, value in ((169, "To", "Mina Patel"), (203, "Subject", "Re: Design review")):
+        canvas.text(412, y, label, 13, MUTED)
+        canvas.text(475, y, value, 15, INK, "bold" if y == 203 else "regular")
+        canvas.line(((411, y + 17), (860, y + 17)), EDGE, 1)
+    draft(canvas, scene, time, "Write a reply…", line_height=23)
+    canvas.line(((411, 400), (860, 400)), EDGE, 1)
+    button(canvas, 412, 424, "Send")
+    canvas.icon("transcript", 490, 416, MUTED)
+
+
+def slack(canvas, scene, time):
+    window(canvas, "Studio workspace", "#ede8f5")
+    canvas.text(411, 172, "#  launch", 19, INK, "bold")
+    canvas.line(((386, 194), (885, 194)), EDGE, 1)
+    canvas.box((411, 213, 446, 248), "#ded4ef", 8)
+    canvas.text(429, 231, "EV", 12, "#4a3d6d", "bold", "mm")
+    canvas.text(458, 222, "Evan", 15, INK, "bold")
+    canvas.text(508, 222, "9:41 AM", 12, MUTED)
+    canvas.text(458, 246, "Anything to test before standup?", 17, INK)
+    canvas.box((412, 298, 859, 425), PAPER, 11, "#8874ac" if time >= FOCUS else EDGE)
+    draft(canvas, scene, time, "Message #launch")
+    canvas.icon("plus", 430, 392, MUTED)
+    canvas.text(458, 400, "Aa", 14, MUTED)
+    button(canvas, 789, 400, "Send", "#685185")
+
+
+def claude(canvas, scene, time):
+    window(canvas, "Planning session", "#f5ece5")
+    canvas.text(414, 176, "Workshop planning", 24, INK, "serif")
+    canvas.text(414, 212, "What should the first session cover?", 17, MUTED)
+    canvas.box((411, 266, 860, 424), "#faf4ee", 13, "#a77377" if time >= FOCUS else EDGE)
+    draft(canvas, scene, time, "Give Claude a task…")
+    canvas.icon("plus", 428, 391, MUTED)
+    button(canvas, 779, 399, "Submit", "#8c5355")
+
+
+def document(canvas, scene, time):
+    window(canvas, "Research notes", "#edf3f4")
+    canvas.box((412, 156, 859, 195), "#eaf0f1", 8)
+    canvas.text(431, 176, "Body text", 13, INK)
+    canvas.line(((509, 164), (509, 187)), "#cdd9da", 1)
+    canvas.text(526, 176, "18", 13, INK)
+    canvas.text(573, 176, "B", 14, INK, "bold")
+    canvas.text(600, 176, "I", 14, INK, "serif")
+    canvas.box((420, 212, 852, 434), WHITE, 5, EDGE)
+    canvas.text(441, 249, "Signup study", 24, INK, "serif")
+    draft(canvas, scene, time, "Start writing…", size=17)
+
+
+DRAW_APP = (email, slack, claude, document)
+
+
+def indicator(canvas, time):
+    # The warm recording trace, blue processing trace, and narrowing capsule follow Jaro’s HUD.
+    age = time - HOLD
+    finish = max(0, time - INSERT)
+    visibility = min(1, age / 0.24) * max(0, 1 - finish / 0.36)
+    cool = min(1, max(0, (time - RELEASE) / 0.28))
+    width = (123 - 39 * cool) * (0.48 + 0.52 * visibility)
+    center_x, center_y = 636, 504
+    canvas.box((center_x - width / 2, 487, center_x + width / 2, 521), HUD, 17, "#4d4355")
+    for column in range(-20, 21):
+        x = column * 2.8
+        if abs(x) > width / 2 - 7:
+            continue
+        phase = column * (0.30 + 0.15 * cool) + age * (7 + 3 * cool)
+        strength = (2.4 + 5.6 * abs(sin(age * 6.2) * cos(age * 2.6))) * (1 - 0.63 * cool)
+        strands = (strength * sin(phase), strength * cos(phase * 1.19))
+        for row in range(-4, 5):
+            y = row * 2.8
+            distance = min(abs(y - strand) for strand in strands)
+            light = visibility * exp(-0.54 * distance) * (0.58 + 0.42 * abs(cos(phase + row)))
+            pearl = (248 - 31 * cool, 244 - 10 * cool, 231 + 24 * cool)
+            color = tuple(round(base + (tip - base) * light) for base, tip in zip((37, 35, 47), pearl))
+            canvas.dot(center_x + x, center_y + y, 0.55 + 0.52 * light, color)
+
+
+def draw_frame(index, time):
+    scene = SCENES[index]
+    canvas = Canvas()
+    canvas.image.paste(artwork(index))
+    legend(canvas, index, scene, time)
+    DRAW_APP[index](canvas, scene, time)
+    if HOLD <= time < INSERT + 0.36:
         indicator(canvas, time)
-
-    point = blend_points((599, 366), field, (time - 0.16) / (FOCUS - 0.16))
+    point = blend_points((769, 410), scene.field, (time - 0.08) / (FOCUS - 0.08))
     if time >= FOCUS:
-        point = blend_points(field, (750, 393), (time - FOCUS - 0.32) / 0.62)
+        point = blend_points(scene.field, (881, 451), (time - FOCUS - 0.30) / 0.58)
     cursor(canvas, point, time - FOCUS)
     return canvas.finish()
 
 
 def render(output):
-    times = (0, HOLD + 0.80, RELEASE + 0.48, INSERT + 0.24)
-    samples = [(scene, time) for scene in SCENES for time in times]
-    palette_sheet = Image.new("RGB", (SIZE[0], len(samples) * SIZE[1] + 32))
-    for index, (scene, time) in enumerate(samples):
-        palette_sheet.paste(draw_frame(scene, time), (0, index * SIZE[1]))
-    for index, color in enumerate((*TRAFFIC_LIGHTS, CHAT_ACCENT)):
-        palette_sheet.paste(color, (index * 160, len(samples) * SIZE[1], (index + 1) * 160, palette_sheet.height))
-    palette = palette_sheet.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-    frames = [
-        draw_frame(scene, frame * FRAME_MS / 1000).quantize(palette=palette, dither=Image.Dither.NONE)
-        for scene in SCENES
-        for frame in range(round(DURATION * 1000 / FRAME_MS))
-    ]
+    next_start = [draw_frame(index, 0) for index in range(len(SCENES))]
+    samples = [draw_frame(index, t) for index in range(len(SCENES)) for t in (HOLD + 0.8, INSERT + 0.8)]
+    sheet = Image.new("RGB", (SIZE[0], len(samples) * SIZE[1]))
+    for index, frame in enumerate(samples):
+        sheet.paste(frame, (0, index * SIZE[1]))
+    palette = sheet.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    frames = []
+    for index in range(len(SCENES)):
+        for frame in range(round(DURATION * 1000 / FRAME_MS)):
+            time = frame * FRAME_MS / 1000
+            image = draw_frame(index, time)
+            if time >= DURATION - FADE:
+                progress = (time - DURATION + FADE) / FADE
+                eased = (1 - cos(pi * progress)) / 2
+                image = Image.blend(image, next_start[(index + 1) % len(SCENES)], eased)
+            frames.append(image.quantize(palette=palette, dither=Image.Dither.NONE))
     output.parent.mkdir(parents=True, exist_ok=True)
     frames[0].save(output, save_all=True, append_images=frames[1:], loop=0,
                    duration=FRAME_MS, optimize=True)
