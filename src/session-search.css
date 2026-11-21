@@ -88,3 +88,5 @@
 @media (max-width: 420px) {
   .session-search-option small { display: none; }
 }
+.session-search-filter { display: flex; align-items: center; gap: .4rem; padding: .35rem .8rem; color: var(--quiet); font-size: .8rem; }
+.session-search-filter input { accent-color: var(--ring); }

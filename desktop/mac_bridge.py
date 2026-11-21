@@ -9,20 +9,48 @@ import asyncio
 import contextlib
 import datetime
 import fcntl
+import hmac
 import json
+import math
 import mimetypes
 import os
 import shutil
 import signal
 import sys
 import tempfile
+from time import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from uuid import UUID, uuid4
+from urllib.parse import unquote
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from engine_lifecycle import URL, library_path, running_engine
+workspace = Path(__file__).resolve().parents[1]
+engine = workspace / "engine" if (workspace / "pyproject.toml").is_file() else workspace
+sys.path[:0] = [str(engine), str(workspace)] if engine != workspace else [str(engine)]
+from engine_lifecycle import HOST, PORT, URL, library_path, running_engine
+from annotation_assets import ASSETS as ANNOTATION_ASSETS, annotation_input, annotation_origin, staged_annotation_paths
+from annotation_rollback import undo_annotation
+from annotation_routing import (RouteUnavailable, capture_for_routing, correct_annotation, destinations as annotation_destinations, recent_deliveries,
+                                forget_destination_rule, send_annotation, set_destination_rule)
+from diagnostics import write_event
+from managed_preferences import ManagedFeatureError, meetings_managed, opencode_managed, require_annotation, require_meetings, require_opencode
+from output_transform_runtime import CAPABILITIES, is_embedded_config
+from output_transform_policy import DISABLED_MESSAGE, PROGRAM_MESSAGE, TransformPolicy, current_policy
+from output_transform_workspace import ConfigInspector, config_directory, find_config, initialize_workspace
+from dictation_output import (MAX_REWRITE_DEADLINE, is_script_step, is_transform_step, merge_vocabulary, parse_profiles,
+                              process as process_output, profile_for, review_output_script, vocabulary_terms)
+from dictation_settings import validate_changes
+from local_qwen import MODEL_NAME as REWRITE_MODEL_NAME
+from meeting_brief import LIVE_TITLE_INTERVAL, LiveTitlePlan
+from meeting_rolling import append_rolling
+from native_recordings import normalize_meeting_title, recording_metadata, write_meeting_title, write_recording_metadata
+from saved_annotations import annotation_context, annotation_detail
+from session_store import MissingSession, SessionStore
+from desktop.annotation_automation import AnnotationAutomation
+from desktop.sdk_capture import CaptureError, SDKCapture
 
 
 def send(message):
@@ -85,9 +113,49 @@ def transcript_export(data):
     }
 
 
+@dataclass
+class WarmWorker:
+    child: asyncio.subprocess.Process
+    options: tuple[str, ...]
+    reader: asyncio.Task | None = None
+    events: asyncio.Queue | None = None
+    availability: dict | None = None
+
+
+@dataclass
+class Capture:
+    child: asyncio.subprocess.Process
+    stage: dict
+    marker: BinaryIO
+    settings: dict
+    state: dict
+    global_dictation: bool
+    job: asyncio.Task | None = None
+    started: bool = False
+    finished: bool = False
+    copy_state: dict | None = None
+    title_plan: LiveTitlePlan | None = None
+    title_job: asyncio.Task | None = None
+    warm_events: asyncio.Queue | None = None
+
+    def stop_titles(self):
+        if self.title_job:
+            self.title_job.cancel()
+
+    async def input_events(self):
+        if self.warm_events is None:
+            async for raw in self.child.stdout:
+                yield json.loads(raw)
+        else:
+            while (event := await self.warm_events.get()) is not None:
+                yield event
+
+
 class MacBridge:
     def __init__(self, helpers, http):
+        self.approved_output_script = ("", "", frozenset())
         self.helpers = Path(helpers)
+        self.transform_configs = ConfigInspector(self.helpers / "jaro-transforms")
         self.http = http
         self.root = library_path()
         self.client_id = str(uuid4())
@@ -95,15 +163,31 @@ class MacBridge:
         self.lease_task = None
         self.setup_lock = asyncio.Lock()
         self.capture_lock = asyncio.Lock()
-        self.job = None
-        self.recorder = None
-        self.stage = None
-        self.capture = None
-        self.settings = {}
-        self.stage_lock = None
+        self.captures: dict[str, Capture] = {}
         self.dialog_lock = asyncio.Lock()
-        self.capture_session = None
         self.dictation_stages = {}
+        self.dictation_release_frames = {}
+        self.dictation_jobs = set()
+        self.meeting_mic_lease: tuple[Capture, str] | None = None
+        self.meeting_mic_available = asyncio.Event()
+        self.meeting_mic_available.set()
+        self.warm_worker: WarmWorker | None = None
+        self.warm_requested = None
+        self.warm_request_id = None
+        self.warm_notice = None
+        self.updating = False
+        self.annotation = None
+        self.annotation_delivery_busy = False
+        self.annotation_started_at = None
+        self.automatic_annotations = AnnotationAutomation(
+            self.root, self.automatic_capture, self.automatic_send,
+            lambda detail: send({"event": "jard-annotation-routing", "detail": detail}),
+        )
+        self.control_server = None
+        self.control_dir = None
+        self.control_path = None
+        self.control_pending = {}
+        self.sdk_capture = SDKCapture(self.helpers / "jard-capture", self.transcribe_sdk_take, self.release_sdk_capture)
 
     async def api(self, method, route, **options):
         response = await self.http.request(method, "/api/" + route, **options)
@@ -122,7 +206,8 @@ class MacBridge:
             except httpx.ConnectError:
                 # Another client may have explicitly quit the shared engine.
                 # Finalize on disk so the recording is recoverable at next launch.
-                await self.stop()
+                await asyncio.gather(*(self.stop(take) for take in list(self.captures.values())))
+                await self.sdk_capture.close()
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(18)
@@ -147,11 +232,258 @@ class MacBridge:
             (self.root / ".native-token").read_text().strip()
         )
         await self.api("POST", "clients/" + self.client_id)
+        if not self.connected:
+            write_event("desktop", "connected")
         self.connected = True
+        await self.start_control()
         if self.lease_task is None:
             self.lease_task = asyncio.create_task(self.lease())
         send({"navigate": "app"})
+        if not self.updating:
+            with contextlib.suppress(ValueError, OSError):
+                await self.automatic_annotations.resume()
         return {"ready": True}
+
+    async def start_control(self):
+        if self.control_server:
+            return
+        self.control_dir = tempfile.TemporaryDirectory(prefix="jard-control-", dir="/tmp")
+        self.control_path = Path(self.control_dir.name) / "socket"
+        try:
+            self.control_server = await asyncio.start_unix_server(self.control_connection, str(self.control_path))
+            descriptor, temporary = tempfile.mkstemp(prefix=".control-", dir=self.root)
+            with os.fdopen(descriptor, "w") as pointer:
+                pointer.write(str(self.control_path) + "\n")
+            os.replace(temporary, self.root / ".native-control")
+        except OSError:
+            if self.control_server:
+                self.control_server.close()
+                await self.control_server.wait_closed()
+            self.control_server = None
+            self.control_dir.cleanup()
+            self.control_dir = None
+            self.control_path = None
+
+    async def control_connection(self, reader, writer):
+        own = action = None
+        try:
+            async with asyncio.timeout(16) as deadline:
+                request = json.loads(await reader.readline())
+                token = request.get("token")
+                if not isinstance(token, str) or not hmac.compare_digest(
+                    token.encode(), self.http.headers.get("X-Jard-Token", "").encode()
+                ):
+                    raise ValueError("Invalid Jard control credentials.")
+                action = request.get("action")
+                if action not in ("status", "start", "stop", "toggle", "cancel", "paste-last", "setup", "history",
+                                  "dictation-start-raw", "dictation-toggle-raw", "dictation-stop-print", "history-clear", "history-snapshot",
+                                  "meeting-status", "meeting-record", "meeting-stop", "meeting-copy-last", "meeting-live",
+                                  "annotation-status", "annotation-start", "annotation-stop", "annotation-cancel",
+                                  "annotation-route", "annotation-destinations", "annotation-remember", "annotation-forget", "annotation-send", "annotation-undo", "annotation-correct",
+                                  "desktop-status", "desktop-quit", "desktop-restart", "settings-list", "settings-get", "settings-apply",
+                                  "vocabulary-list", "vocabulary-add", "vocabulary-remove",
+                                  "window-show", "window-hide", "launch-at-login", "check-for-updates", "update-channel",
+                                  "sdk-available", "sdk-start", "sdk-finish", "sdk-cancel", "sdk-heartbeat", "sdk-levels", "sdk-audio"):
+                    raise ValueError("Unknown Jard control action.")
+                if action == "meeting-live":
+                    result = {"ok": True, "result": self.live_meeting(turns=request.get("turns", True) is True)}
+                    await self.write_control_reply(writer, result)
+                    return
+                if action == "annotation-route":
+                    result = await self.annotation_route({"id": request.get("id"), "action": request.get("routeAction", "status")})
+                    await self.write_control_reply(writer, {"ok": True, "result": result})
+                    return
+                if action in ("annotation-destinations", "annotation-remember", "annotation-forget"):
+                    result = await self.annotation_routes(action.removeprefix("annotation-"), request)
+                    await self.write_control_reply(writer, {"ok": True, "result": result})
+                    return
+                if action in ("annotation-send", "annotation-undo", "annotation-correct"):
+                    if action == "annotation-send":
+                        result = await self.deliver_annotation(request)
+                    elif action == "annotation-undo":
+                        deadline.reschedule(asyncio.get_running_loop().time() + 24)
+                        result = await self.change_annotation_delivery(undo_annotation, request.get("deliveryId"),
+                                                                      restore_files=request.get("restoreFiles") is True)
+                    else:
+                        result = await self.change_annotation_delivery(correct_annotation, request.get("deliveryId"))
+                    await self.write_control_reply(writer, {"ok": True, "result": result})
+                    return
+                if action == "sdk-available":
+                    await self.write_control_reply(writer, {"ok": True, "result": True})
+                    return
+                if action.startswith("sdk-") and action != "sdk-start":
+                    identifier = str(UUID(request["capture"]))
+                    owner, cursor = request.get("owner"), request.get("cursor", 0)
+                    if not isinstance(owner, str) or not owner.isascii() or len(owner) != 64 or type(cursor) is not int or cursor < 0:
+                        raise CaptureError("dictation-not-found", "This recording is unavailable.", 404)
+                    data = self.sdk_capture.request(action.removeprefix("sdk-"), identifier, owner, cursor)
+                    await self.write_control_reply(writer, {"ok": True, "result": data})
+                    return
+                options = {}
+                if action == "dictation-stop-print":
+                    deadline.reschedule(asyncio.get_running_loop().time() + 65)
+                elif action == "history":
+                    query, offset = request.get("query", ""), request.get("offset", 0)
+                    if not isinstance(query, str) or len(query) > 500 or type(offset) is not int or not 0 <= offset <= 100_000:
+                        raise ValueError("Invalid history query or page offset.")
+                    options = {"query": query, "offset": offset}
+                elif action == "annotation-start":
+                    require_annotation()
+                    source = request.get("source", "display")
+                    if source not in ("display", "window", "area", "phone"):
+                        raise ValueError("Choose a display, window, area, or wired iPhone or iPad to annotate.")
+                    options = {"source": source}
+                    if "languages" in request:
+                        languages = request["languages"]
+                        if not isinstance(languages, list) or len(languages) > 25 or any(
+                                not isinstance(language, str) or not 1 <= len(language) <= 12 for language in languages):
+                            raise ValueError("Invalid annotation language hints.")
+                        options["languages"] = languages
+                elif action == "meeting-record":
+                    require_meetings()
+                    if "title" in request:
+                        options = {"title": normalize_meeting_title(request["title"])}
+                elif action == "history-clear":
+                    if request.get("confirm") is not True:
+                        raise ValueError("Confirm deletion of the entire dictation history.")
+                elif action == "window-show":
+                    pane = request.get("pane", "settings")
+                    if pane not in ("settings", "general", "dictation", "history", "output", "meetings", "annotate", "home"):
+                        raise ValueError("Unknown Jaro workspace pane.")
+                    options = {"pane": pane}
+                elif action == "settings-get":
+                    key = request.get("key")
+                    if not isinstance(key, str) or not 1 <= len(key) <= 80:
+                        raise ValueError("Provide a setting key or prefix.")
+                    options = {"key": key}
+                elif action == "settings-apply":
+                    changes = request.get("changes")
+                    validate_changes(changes)
+                    options = {"changes": changes}
+                elif action in ("vocabulary-add", "vocabulary-remove"):
+                    term, spellings = request.get("term"), request.get("soundsLike", [])
+                    if (
+                        not isinstance(term, str) or not 1 <= len(term) <= 80 or
+                        not isinstance(spellings, list) or len(spellings) > 8 or
+                        any(not isinstance(value, str) or not 1 <= len(value) <= 80 for value in spellings)
+                    ):
+                        raise ValueError("Provide a term and up to eight alternate spellings of at most 80 characters.")
+                    options = {"term": term, "soundsLike": spellings}
+                elif action in ("desktop-quit", "desktop-restart") and "force" in request:
+                    if request["force"] is not True:
+                        raise ValueError("Invalid forced-exit request.")
+                    deadline.reschedule(asyncio.get_running_loop().time() + 85)
+                    options = {"force": True}
+                elif action == "launch-at-login" and "enabled" in request:
+                    if type(request["enabled"]) is not bool:
+                        raise ValueError("Choose on or off for Launch at Login.")
+                    options = {"enabled": request["enabled"]}
+                elif action == "update-channel":
+                    channel, offer = request.get("channel"), request.get("offer")
+                    if channel is not None:
+                        if channel not in ("stable", "dev") or offer is not None:
+                            raise ValueError("Choose Stable or Development.")
+                        options["channel"] = channel
+                    elif offer is not None:
+                        if not isinstance(offer, str) or len(offer) != 64 or any(char not in "0123456789abcdef" for char in offer):
+                            raise ValueError("Provide the digest of the current release offer.")
+                        options["offer"] = offer
+                if len(self.control_pending) >= 8:
+                    raise ValueError("Jard is busy. Try again.")
+                own = str(uuid4())
+                future = asyncio.get_running_loop().create_future()
+                self.control_pending[own] = future
+                send({"nativeRequest": {"id": own, "action": action, **options}})
+                result = await future
+                if action == "sdk-start" and result.get("ok"):
+                    data = await self.start_sdk_capture(own, result["result"], request.get("languages", []))
+                    result = {"ok": True, "result": data}
+        except CaptureError as error:
+            result = {"ok": False, "error": str(error), "code": error.code, "status": error.status}
+        except ManagedFeatureError as error:
+            result = {"ok": False, "error": str(error), "code": "managed", "status": 403}
+        except (ValueError, TimeoutError, AttributeError, KeyError, OSError) as error:
+            result = {"ok": False, "error": str(error) or "The Jard control request timed out."}
+        finally:
+            self.control_pending.pop(own, None)
+            if own and action == "sdk-start" and (not self.sdk_capture.active or self.sdk_capture.active.identifier != own):
+                self.release_sdk_capture(own)
+        try:
+            await self.write_control_reply(writer, result)
+        finally:
+            if own and action in ("desktop-quit", "desktop-restart") and result.get("ok"):
+                send({"desktopExitAccepted": own})
+
+    async def start_sdk_capture(self, identifier, settings, languages):
+        async with self.capture_lock:
+            if not self.control_server or not self.control_server.is_serving():
+                raise CaptureError("service-capture-unavailable", "Jard is closing.", 503)
+            if self.updating or self.annotation or self.captures or self.dictation_stages or self.dictation_jobs or self.sdk_capture.active:
+                raise CaptureError("dictation-busy", "A recording is already active or Jard is preparing to restart.")
+            if (await self.api("GET", "status"))["status"] != "ready":
+                raise CaptureError("model-unavailable", "Wait for the speech model to finish loading.", 503)
+            await self.close_warm()
+            return await self.sdk_capture.start(identifier, self.control_dir.name, self.input_options(settings),
+                                                languages or settings["languages"])
+
+    def release_sdk_capture(self, identifier):
+        send({"sdkCaptureEnded": identifier})
+        asyncio.create_task(self.reconcile_warm())
+
+    async def transcribe_sdk_take(self, path, languages):
+        async def chunks():
+            with path.open("rb") as audio:
+                while block := audio.read(65536):
+                    yield block
+
+        result = await self.api("POST", "native/transcribe", content=chunks(), params={"language": languages},
+                                headers={"Content-Type": "application/octet-stream"}, timeout=180)
+        return result["text"]
+
+    @staticmethod
+    async def write_control_reply(writer, result):
+        try:
+            with contextlib.suppress(ConnectionError):
+                writer.write(json.dumps(result, ensure_ascii=False).encode() + b"\n")
+                await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(ConnectionError):
+                await writer.wait_closed()
+
+    def live_meeting(self, *, turns):
+        take = self.captures.get("recording")
+        if not take or not take.state.get("meetingStartedAt"):
+            return None
+        capture = take.state
+        started = capture["meetingStartedAt"]
+        provider = capture["meetingLabel"]
+        calendar = capture.get("meetingCalendar")
+        title = capture.get("provisionalTitle")
+        name = capture.get("meetingTitle") or (calendar or {}).get("title") or title or f"{provider} meeting"
+        return {"id": take.stage["id"], "name": name,
+                "meetingProvider": provider, "meeting": True, "meetingCalendar": calendar, "created": started,
+                "meetingStartedAt": started, "duration": capture["seconds"], "processed": capture["seconds"],
+                "status": "recording" if not take.finished else "processing",
+                **({"meetingMicrophoneWarning": "digitalSilence"} if capture.get("meetingMicrophoneWarning") else {}),
+                **({"provisionalTitle": title} if title else {}),
+                **({"meetingTurns": capture["meetingTurns"]} if turns else {})}
+
+    async def close_control(self):
+        if not self.control_server:
+            return
+        self.control_server.close()
+        for future in self.control_pending.values():
+            if not future.done():
+                future.set_result({"ok": False, "error": "Jard is closing."})
+        await self.control_server.wait_closed()
+        async with self.capture_lock:
+            await self.sdk_capture.close()
+        pointer = self.root / ".native-control"
+        with contextlib.suppress(OSError):
+            if pointer.read_text().strip() == str(self.control_path):
+                pointer.unlink()
+        self.control_dir.cleanup()
 
     async def setup(self, source):
         async with self.setup_lock:
@@ -187,13 +519,18 @@ class MacBridge:
     async def devices(self):
         devices = json.loads(await run_helper(self.helpers / "jard-capture", "devices"))
         drafts = await self.api("GET", "native/staging")
+        active = self.workspace_capture()
+        active_stages = {take.stage["id"] for take in self.captures.values()}
+        hide_meeting_drafts = meetings_managed()
         return {
             "microphone": devices["microphone"],
-            "capture": self.capture,
+            **({"dictationMicrophones": devices["dictationMicrophones"]} if "dictationMicrophones" in devices else {}),
+            "inputs": devices.get("inputs", []),
+            "capture": active.state if active and active.started else None,
             "drafts": [
-                {"id": d["id"], "seconds": max(0, (d["bytes"] - 44) / 96000)}
+                {"id": d["id"], "seconds": max(0, (d["bytes"] - 44) / 96000), "meeting": d.get("meeting", False)}
                 for d in drafts
-                if not self.stage or d["id"] != self.stage["id"]
+                if d["id"] not in active_stages and not (hide_meeting_drafts and d.get("meeting"))
             ],
         }
 
@@ -225,7 +562,7 @@ class MacBridge:
         )
 
     async def open_audio(self, args):
-        if self.stage:
+        if self.captures:
             raise ValueError("Stop the recording before opening another file.")
         selection = (await self.dialog("open-audio")).get("path")
         if not selection:
@@ -246,11 +583,168 @@ class MacBridge:
                 await self.api("DELETE", "native/staging/" + stage["id"])
             raise
 
-    async def record(self, args):
-        # Job ownership is established before the permission prompt returns. Repeated
-        # clicks and page reloads consequently cannot create a second capture.
+    @staticmethod
+    def input_options(args):
+        uid = args.get("inputDevice")
+        options = ("--input", uid) if isinstance(uid, str) and uid and "\x00" not in uid else ()
+        return options + ("--avoid-bluetooth",) if args.get("avoidBluetooth") is True else options
+
+    def publish_warm(self, availability=None):
+        if self.warm_request_id is None:
+            return
+        detail = {"request": self.warm_request_id, **(availability or {"phase": "idle"})}
+        if detail != self.warm_notice:
+            self.warm_notice = detail
+            send({"event": "jard-microphone", "detail": detail})
+
+    async def read_warm(self, worker):
+        try:
+            async for raw in worker.child.stdout:
+                event = json.loads(raw)
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("event")
+                if kind == "warmAvailability":
+                    phase, microphone, message = (event.get(key) for key in ("phase", "microphone", "message"))
+                    if phase in ("ready", "fallback", "unavailable") and isinstance(microphone, str) and isinstance(message, str):
+                        worker.availability = {"phase": phase, "microphone": microphone[:240], "message": message[:600]}
+                        if self.warm_worker is worker and worker.options == self.warm_requested:
+                            self.publish_warm(worker.availability)
+                elif kind == "microphoneClockReset" and event.get("result") in ("reset", "unavailable", "failed", "restoreFailed"):
+                    write_event("microphone", "clock_" + event["result"])
+                elif worker.events is not None:
+                    if kind != "levels" or worker.events.qsize() < 128:
+                        worker.events.put_nowait(event)
+                    if kind == "takeEnded":
+                        worker.events = None
+        except (OSError, ValueError):
+            if worker.child.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    worker.child.terminate()
+        finally:
+            if worker.events is not None:
+                worker.events.put_nowait(None)
+                worker.events = None
+            if self.warm_worker is worker and worker.options == self.warm_requested:
+                self.publish_warm({"phase": "unavailable", "message": "The microphone stopped. Try the dictation shortcut to reconnect."})
+
+    async def close_warm(self):
+        worker = self.warm_worker
+        self.warm_worker = None
+        if worker is None:
+            return
+        self.publish_warm()
+        child = worker.child
+        if child.returncode is None:
+            child.stdin.close()
+            try:
+                await asyncio.wait_for(child.wait(), 2)
+            except TimeoutError:
+                child.kill()
+                await child.wait()
+        if worker.reader is not None:
+            await worker.reader
+
+    async def open_warm(self, options):
+        worker = self.warm_worker
+        if worker and worker.child.returncode is None and worker.options == options and worker.reader and not worker.reader.done():
+            if worker.availability is not None:
+                self.publish_warm(worker.availability)
+            return worker
+        await self.close_warm()
+        child = await asyncio.create_subprocess_exec(
+            str(self.helpers / "jard-capture"), "warm", *options,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        )
+        worker = self.warm_worker = WarmWorker(child, options)
+        try:
+            raw = await asyncio.wait_for(child.stdout.readline(), 3)
+            ready = json.loads(raw)
+            if not isinstance(ready, dict) or ready.get("event") != "warmReady":
+                message = ready.get("message") if isinstance(ready, dict) else None
+                raise RuntimeError(message or "The microphone could not stay ready.")
+        except (TimeoutError, ValueError, OSError, RuntimeError) as error:
+            await self.close_warm()
+            message = str(error) if isinstance(error, RuntimeError) else "The microphone could not stay ready."
+            if options == self.warm_requested:
+                self.publish_warm({"phase": "unavailable", "message": message[:600]})
+            return None
+        worker.reader = asyncio.create_task(self.read_warm(worker))
+        return worker
+
+    async def reconcile_warm(self):
         async with self.capture_lock:
-            if self.job and not self.job.done():
+            recording = self.captures.get("recording")
+            if (self.updating or self.annotation or self.sdk_capture.active or self.meeting_mic_lease
+                    or "dictation" in self.captures or (recording and not recording.state.get("meeting"))):
+                return
+            if self.warm_requested is None:
+                await self.close_warm()
+            else:
+                await self.open_warm(self.warm_requested)
+
+    async def warm(self, args):
+        self.warm_requested = self.input_options(args) if args.get("keep") is True else None
+        request = args.get("request")
+        self.warm_request_id = request if self.warm_requested is not None and isinstance(request, str) and len(request) == 36 else None
+        await self.reconcile_warm()
+        return {"warm": bool(self.warm_worker and self.warm_worker.child.returncode is None)}
+
+    def workspace_capture(self):
+        dictation = self.captures.get("dictation")
+        return self.captures.get("recording") or (dictation if dictation and not dictation.global_dictation else None)
+
+    async def allow_meeting_mic_recovery(self, take, identifier):
+        async with self.capture_lock:
+            if self.captures.get("recording") is not take or take.finished or take.child.returncode is not None:
+                return
+            allowed = not (self.meeting_mic_lease or "dictation" in self.captures or self.dictation_stages
+                           or self.dictation_jobs or self.sdk_capture.active or self.updating)
+            if allowed:
+                await self.close_warm()
+                self.meeting_mic_lease = (take, identifier)
+                self.meeting_mic_available.clear()
+            try:
+                command = "recover-mic" if allowed else "defer-mic"
+                take.child.stdin.write(f"{command} {identifier}\n".encode("ascii"))
+                await take.child.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                if allowed:
+                    self.release_meeting_mic(take, identifier)
+
+    def release_meeting_mic(self, take, identifier=None):
+        lease = self.meeting_mic_lease
+        if lease and lease[0] is take and (identifier is None or lease[1] == identifier):
+            self.meeting_mic_lease = None
+            self.meeting_mic_available.set()
+            asyncio.create_task(self.reconcile_warm())
+
+    async def select_meeting_input(self, args):
+        uid = args.get("inputDevice")
+        if not isinstance(uid, str) or len(uid) > 1024 or "\x00" in uid:
+            raise ValueError("Invalid microphone selection.")
+        async with self.capture_lock:
+            take = self.captures.get("recording")
+            if not take or not take.state.get("meeting") or take.finished or take.child.returncode is not None:
+                return None
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                take.child.stdin.write(("input " + json.dumps(uid) + "\n").encode("ascii"))
+                await take.child.stdin.drain()
+
+    async def record(self, args):
+        if args.get("meeting") is not None:
+            require_meetings()
+        # Reserve each slot under one lock so repeated starts cannot create a second take.
+        async with self.capture_lock:
+            try:
+                await asyncio.wait_for(self.meeting_mic_available.wait(), 3)
+            except TimeoutError:
+                raise ValueError("The meeting microphone is reconnecting. Try dictation again.") from None
+            if self.updating:
+                raise ValueError("Jard is preparing to restart.")
+            if self.annotation:
+                raise ValueError("Stop the screen annotation first.")
+            if self.sdk_capture.active:
                 raise ValueError("A recording is already active.")
             dictation = args.get("dictation")
             if dictation:
@@ -258,78 +752,192 @@ class MacBridge:
             mode = "mic" if dictation else args.get("mode", "both")
             if mode not in ("both", "mic", "system"):
                 raise ValueError("Unknown recording source.")
-            self.settings = self.options({**args, "diarization": False, "live": True} if dictation else args)
+            meeting = args.get("meeting")
+            meeting_label = args.get("meetingLabel", "Meeting")
+            if meeting is not None:
+                meeting = str(UUID(meeting))
+                if dictation or mode != "both":
+                    raise ValueError("A meeting requires microphone and Mac audio.")
+                if not isinstance(meeting_label, str) or not 1 <= len(meeting_label) <= 80 or any(
+                    char in "/\\:" or not char.isprintable() for char in meeting_label
+                ):
+                    raise ValueError("Invalid meeting provider name.")
+            global_dictation = bool(dictation and args.get("global") is True)
+            slot = "dictation" if dictation else "recording"
+            recording, speaking = self.captures.get("recording"), self.captures.get("dictation")
+            compatible = (
+                global_dictation and recording and recording.state.get("meeting")
+                or meeting and speaking and speaking.global_dictation
+            )
+            if slot in self.captures or (self.captures and not compatible):
+                raise ValueError("A recording is already active.")
+            live = args.get("live") is True if global_dictation else bool(dictation or args.get("live"))
+            settings = self.options({**args, "diarization": False, "live": live} if dictation else args)
             if (await self.api("GET", "status"))["status"] != "ready":
                 raise ValueError("Wait for the speech model to finish loading.")
-            stage = await self.api(
-                "POST", "native/staging", params={"dictation" if dictation else "recording": "true"}
-            )
+            stage_options = {"dictation" if dictation else "recording": "true"}
+            if meeting:
+                stage_options.update(meeting="true", provider=meeting_label)
+            calendar = args.get("meetingCalendar") if meeting else None
+            title = normalize_meeting_title(args["meetingTitle"]) if meeting and "meetingTitle" in args else None
+            stage = await self.api("POST", "native/staging", params=stage_options, **({"json": calendar} if calendar else {}))
+            marker = None
             try:
-                self.stage_lock = (
+                marker = (
                     Path(stage["path"]).with_suffix(".dictation" if dictation else ".recording").open("r+b")
                 )
-                fcntl.flock(self.stage_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if not dictation and args.get("notesDraft"):
-                    self.stage_lock.write(str(UUID(args["notesDraft"])).encode("ascii"))
-                    self.stage_lock.flush()
-                self.recorder = await asyncio.create_subprocess_exec(
+                fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                notes_draft = str(UUID(args["notesDraft"])) if not dictation and args.get("notesDraft") else None
+                if meeting and (title or notes_draft):
+                    metadata = recording_metadata(marker)
+                    if title:
+                        metadata["meetingTitle"] = title
+                    if notes_draft:
+                        metadata["notesDraft"] = notes_draft
+                    write_recording_metadata(marker, metadata)
+                elif notes_draft:
+                    marker.write(notes_draft.encode("ascii"))
+                    marker.flush()
+                options = self.input_options(args) if global_dictation else ()
+                worker = self.warm_worker
+                warm = worker if global_dictation and args.get("keep") is True and worker and worker.options == options else None
+                warm_events = None
+                if meeting:
+                    options = ("--separate-tracks",)
+                    application = args.get("meetingApplication")
+                    if isinstance(application, str) and 0 < len(application) <= 255:
+                        options += ("--call-application", application)
+                    backend = args.get("meetingSystemAudio")
+                    if backend in ("tap", "tapAndScreen", "screen"):
+                        options += ("--system-audio", backend, "--host-pid", str(os.getppid()))
+                    options += self.input_options({"inputDevice": args.get("inputDevice")})
+                if warm and warm.child.returncode is None and warm.reader and not warm.reader.done():
+                    try:
+                        warm_events = warm.events = asyncio.Queue()
+                        queued_at = args.get("queuedAt")
+                        warm.child.stdin.write((json.dumps({
+                            "start": stage["path"], "preRoll": args.get("preRoll") is not False,
+                            **({"queuedAt": queued_at} if type(queued_at) in (int, float) and 0 < queued_at < math.inf else {}),
+                        }) + "\n").encode())
+                        await warm.child.stdin.drain()
+                    except (BrokenPipeError, ConnectionResetError):
+                        await self.close_warm()
+                        warm = warm_events = None
+                else:
+                    if not meeting:
+                        await self.close_warm()
+                    warm = None
+                cold_recovery = global_dictation and args.get("keep") is not True
+                child = warm.child if warm else await asyncio.create_subprocess_exec(
                     str(self.helpers / "jard-capture"),
-                    "record",
-                    "--mode",
-                    mode,
-                    "--output",
-                    stage["path"],
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
+                    "record", "--mode", mode, "--output", stage["path"],
+                    *(("--meter",) if global_dictation else ()),
+                    *(("--cold-recovery",) if cold_recovery else ()), *options,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 )
             except BaseException:
-                if self.stage_lock:
-                    self.stage_lock.close()
-                    self.stage_lock = None
+                if marker:
+                    marker.close()
                 await self.api("DELETE", "native/staging/" + stage["id"])
                 raise
-            self.stage = stage
-            self.capture_session = {
+            state = {
                 "mode": mode,
-                "live": bool(dictation or args.get("live")),
+                "live": live,
+                "warm": warm is not None,
                 **({"dictation": dictation} if dictation else {}),
+                **({"meeting": meeting, "meetingLabel": meeting_label, "meetingCalendar": calendar,
+                    "meetingTurns": [], **({"meetingTitle": title} if title else {})} if meeting else {}),
                 "seconds": 0,
                 "text": "",
                 "segments": [],
             }
-            self.job = asyncio.create_task(self.record_events())
+            take = Capture(child, stage, marker, settings, state, global_dictation,
+                           title_plan=LiveTitlePlan() if meeting and live and not title else None,
+                           warm_events=warm_events)
+            self.captures[slot] = take
+            take.job = asyncio.create_task(self.record_events(slot, take))
         return {"starting": True}
 
-    async def live_preview(self):
+    async def live_titles(self, take):
+        plan = take.title_plan
+        path = Path(take.stage["path"])
+        while not take.finished and not plan.finished:
+            await asyncio.sleep(LIVE_TITLE_INTERVAL)
+            if (not take.started or take.finished or not plan.due() or self.capture_lock.locked()
+                    or "dictation" in self.captures or self.dictation_jobs):
+                continue
+            timeline = plan.timeline
+            try:
+                value = await self.api("POST", f"native/staging/{take.stage['id']}/meeting-title",
+                                       params={"through": plan.through}, timeout=35)
+                if take.finished or asyncio.current_task().cancelling() or self.captures.get("recording") is not take:
+                    return
+                if isinstance(value, dict) and value.get("automatic") is False:
+                    continue
+                title = write_meeting_title(path, value["title"])
+            except (httpx.HTTPError, OSError, KeyError, TypeError, ValueError):
+                plan.record(published=False, timeline=timeline)
+                continue
+            plan.record(published=True, timeline=timeline)
+            take.state["provisionalTitle"] = title
+            emit("meetingTitle", meeting=take.state["meeting"], title=title)
+
+    async def live_preview(self, take):
         block = 4 * 48000
         start = 0
         parts = []
         warned = False
-        capture_id = self.capture_session.get("dictation")
+        warned_storage = False
+        capture = take.state
+        capture_id = capture.get("dictation")
         metadata = {"dictation": capture_id} if capture_id else {}
-        while self.stage:
+        meeting = capture.get("meeting")
+        copy_state = take.copy_state
+        if meeting:
+            metadata["meeting"] = meeting
+        path = Path(take.stage["path"])
+        sources = [path.with_suffix(f".{source}.wav") for source in ("mic", "system")] if meeting else [path]
+        while True:
             await asyncio.sleep(0.35)
-            if not self.capture:
+            if not take.started:
                 continue
-            available = max(0, (Path(self.stage["path"]).stat().st_size - 44) // 2)
-            if not self.capture["live"]:
-                start = available
+            if meeting and (self.capture_lock.locked() or "dictation" in self.captures or self.dictation_jobs):
+                # Capture continues to disk. Wait before queuing another background
+                # decode so the spoken shortcut does not compete for the same model.
                 continue
-            if available - start < block:
+            available = max(0, (min(source.stat().st_size for source in sources) - 44) // 2)
+            cut = copy_state.get("cut") if copy_state else None
+            if not capture["live"] and cut is None:
+                if not copy_state:
+                    start = available
                 continue
-            if available - start > block * 3:
+            size = min(block, cut - start) if cut is not None and cut > start else block
+            if available - start < size:
+                continue
+            if not meeting and available - start > block * 3:
                 start = available - block
             try:
                 value = await self.api(
                     "POST",
-                    f"native/staging/{self.stage['id']}/preview",
-                    params={**self.settings, "start": start, "frames": block},
+                    f"native/staging/{take.stage['id']}/preview",
+                    params={**take.settings, "start": start, "frames": size, **({"meeting": "true"} if meeting else {})},
                 )
-                if self.capture and self.capture["live"] and value.get("text"):
+                if meeting:
+                    try:
+                        append_rolling(path, start, start + size, value)
+                        if take.title_plan:
+                            take.title_plan.observe(start + size, value["segments"])
+                    except (OSError, ValueError):
+                        if not warned_storage:
+                            emit("warning", **metadata, message="Live text could not be saved. Recording continues.")
+                            warned_storage = True
+                if (capture["live"] or copy_state) and value.get("text"):
+                    if meeting:
+                        capture["meetingTurns"].extend(value["segments"])
                     # Keep the provisional UI bounded. The final pass always uses the full take.
                     parts = (parts + [value])[-160:]
-                    self.capture["text"] = " ".join(part["text"] for part in parts)
-                    self.capture["segments"] = [
+                    capture["text"] = " ".join(part["text"] for part in parts)
+                    capture["segments"] = [
                         segment
                         for part in parts
                         for segment in part.get("segments", [])
@@ -337,8 +945,9 @@ class MacBridge:
                     emit(
                         "preview",
                         **metadata,
-                        text=self.capture["text"],
-                        segments=self.capture["segments"],
+                        **({"delta": value["text"], "deltaSegments": value["segments"], "through": start + size} if meeting else {}),
+                        text=capture["text"],
+                        segments=capture["segments"],
                     )
                 warned = False
             except httpx.HTTPError:
@@ -349,87 +958,216 @@ class MacBridge:
                         message="Live preview is delayed. The recording is still being saved.",
                     )
                 warned = True
-            start += block
+                if meeting:
+                    continue
+            start += size
+            if copy_state:
+                copy_state["through"] = start
+                copy_state["changed"].set()
 
-    async def record_events(self):
-        child, stage = self.recorder, self.stage
-        capture = self.capture_session
+    async def copy_meeting_through_now(self, args):
+        expected = str(UUID(args["meeting"]))
+        take = self.captures.get("recording")
+        state = take.copy_state if take else None
+        if not state or take.state.get("meeting") != expected or take.finished:
+            raise ValueError("This meeting is no longer active.")
+        child = take.child
+        if state.get("request"):
+            raise ValueError("Jard is already preparing a meeting excerpt.")
+        request = str(uuid4())
+        state["request"] = request
+        state["cut"] = None
+        try:
+            async with asyncio.timeout(3):
+                child.stdin.write(f"copy {request}\n".encode())
+                await child.stdin.drain()
+                while not state.get("closed"):
+                    cut = state["cut"]
+                    if cut is not None and state["through"] >= cut:
+                        return {"through": cut, "complete": True}
+                    state["changed"].clear()
+                    await state["changed"].wait()
+        except (TimeoutError, BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            state["request"] = state["cut"] = None
+            state["changed"].set()
+        return {"through": state["through"], "complete": False}
+
+    async def record_events(self, slot, take):
+        child, stage, capture = take.child, take.stage, take.state
         capture_id = capture.get("dictation")
+        meeting = capture.get("meeting")
 
         def notify(kind, **fields):
             if capture_id:
                 fields["dictation"] = capture_id
+            if take.global_dictation:
+                fields["global"] = True
+            if meeting:
+                fields["meeting"] = meeting
             emit(kind, **fields)
+            if not capture_id and kind in ("started", "finished", "accepted", "error"):
+                write_event("meeting" if meeting else "recording", kind)
 
         path = Path(stage["path"])
-        preview = asyncio.create_task(self.live_preview())
+        copy_state = {"through": 0, "changed": asyncio.Event()} if meeting else None
+        take.copy_state = copy_state
+        preview = asyncio.create_task(self.live_preview(take))
+        if take.title_plan:
+            take.title_job = asyncio.create_task(self.live_titles(take))
         reason = ""
         permission = {}
+        interruption = {}
+        opening_abandoned = False
+        warm_ended = False
         try:
-            async for raw in child.stdout:
-                event = json.loads(raw)
+            async for event in take.input_events():
                 kind = event.get("event")
+                if capture_id and kind in ("error", "finished") and event.get("interruption") in ("microphone", "discontinuity"):
+                    interruption = {"interruption": event["interruption"]}
+                    for field in ("failedAt", "capturedThrough"):
+                        stamp = event.get(field)
+                        if type(stamp) in (int, float) and 0 < stamp < math.inf:
+                            interruption[field] = stamp
+                    if type(event.get("hasLiveAudio")) is bool:
+                        interruption["hasLiveAudio"] = event["hasLiveAudio"]
                 if kind == "started":
-                    self.capture = self.capture_session
+                    take.started = True
+                    if meeting:
+                        started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        capture["meetingStartedAt"] = started
+                        with contextlib.suppress(OSError):
+                            take.marker.seek(0)
+                            metadata = recording_metadata(take.marker)
+                            metadata.update(meetingStartedAt=started, languageHints=take.settings["language"])
+                            write_recording_metadata(take.marker, metadata)
                     notify(
                         "started",
-                        mode=self.capture["mode"],
+                        mode=capture["mode"],
                         microphone=event["microphone"],
+                        **({"live": True, "session": stage["id"]} if meeting else {}),
+                        **({"openedAt": event["openedAt"]} if capture_id and "openedAt" in event else {}),
+                        **({"usingDefaultMicrophone": True} if capture_id and event.get("usingDefaultMicrophone") is True else {}),
                     )
-                elif kind == "levels" and self.capture:
-                    self.capture["seconds"] = event["seconds"]
+                elif kind == "levels" and take.started:
+                    capture["seconds"] = event["seconds"]
                     notify(
                         "levels",
                         seconds=event["seconds"],
                         mic=event["mic"],
                         system=event["system"],
                         microphone=event["microphone"],
+                        **({"micRms": event["micRms"]} if "micRms" in event else {}),
                     )
                 elif kind == "sourceChanged":
                     notify(kind, microphone=event["microphone"], message=event["message"])
+                elif kind == "meetingSystemAudio" and meeting and take.started and type(event.get("available")) is bool:
+                    notify(kind, available=event["available"])
+                elif kind == "meetingMicWarning" and meeting and take.started and type(event.get("active")) is bool:
+                    active = event["active"]
+                    if active and not capture.get("meetingMicrophoneWarning"):
+                        capture["meetingMicrophoneWarning"] = "digitalSilence"
+                        with contextlib.suppress(OSError):
+                            take.marker.seek(0)
+                            metadata = recording_metadata(take.marker)
+                            metadata["meetingMicrophoneWarning"] = capture["meetingMicrophoneWarning"]
+                            write_recording_metadata(take.marker, metadata)
+                    notify(kind, active=active)
+                elif kind == "meetingMicRecoveryRequest" and meeting and take.started:
+                    identifier = event.get("id")
+                    if isinstance(identifier, str):
+                        with contextlib.suppress(ValueError):
+                            await self.allow_meeting_mic_recovery(take, str(UUID(identifier)))
+                elif kind == "meetingMicRecoveryDone" and meeting:
+                    identifier = event.get("id")
+                    if isinstance(identifier, str):
+                        self.release_meeting_mic(take, identifier)
+                elif kind == "microphoneClockReset" and event.get("result") in ("reset", "unavailable", "failed", "restoreFailed"):
+                    write_event("microphone", "clock_" + event["result"])
+                elif kind == "openingAbandoned":
+                    opening_abandoned = True
                 elif kind == "error":
+                    take.stop_titles()
                     reason = event["message"]
                     if event.get("permission") in ("mic", "system"):
                         permission = {"permission": event["permission"]}
+                elif kind == "meetingCopy" and copy_state and copy_state.get("request") == event.get("request"):
+                    copy_state["cut"] = max(copy_state["through"], int(event["frame"]))
+                    copy_state["changed"].set()
                 elif kind == "finished":
+                    take.stop_titles()
                     reason = event.get("reason", "Stopped")
-            status = await child.wait()
-            if status and not reason:
-                reason = "The recorder exited unexpectedly."
+                    if capture_id and type(event.get("releaseFrame")) is int:
+                        capture["releaseFrame"] = event["releaseFrame"]
+                elif kind == "takeEnded" and capture["warm"]:
+                    warm_ended = True
+                    break
+            if not warm_ended:
+                status = await child.wait()
+                if capture["warm"] and self.warm_worker and self.warm_worker.child is child:
+                    self.warm_worker = None
+                if status and not reason:
+                    reason = "The recorder exited unexpectedly."
         except (OSError, ValueError, KeyError) as e:
             reason = explain(e)
             if child.returncode is None:
                 child.terminate()
                 await child.wait()
         finally:
+            take.finished = True
+            if meeting:
+                self.release_meeting_mic(take)
+            take.stop_titles()
+            if take.title_job:
+                await asyncio.gather(take.title_job, return_exceptions=True)
+            if copy_state:
+                # Allow a cut pressed before Stop to read the final committed samples.
+                if copy_state.get("cut") is not None:
+                    with contextlib.suppress(OSError):
+                        committed = min((path.with_suffix(f".{source}.wav").stat().st_size - 44) // 2
+                                        for source in ("mic", "system"))
+                        copy_state["cut"] = min(copy_state["cut"], max(0, committed))
+                        copy_state["changed"].set()
+                        while copy_state.get("request"):
+                            copy_state["changed"].clear()
+                            await copy_state["changed"].wait()
+                copy_state["closed"] = True
+                copy_state["changed"].set()
             preview.cancel()
             with contextlib.suppress(asyncio.CancelledError, OSError):
                 await preview
-            self.capture = None
-            self.recorder = None
+            take.started = False
         try:
             if capture_id:
-                if not capture.get("discard") and not permission and path.is_file() and path.stat().st_size > 44:
+                if not capture.get("discard") and not permission and not opening_abandoned and path.is_file() and path.stat().st_size > 44:
                     self.dictation_stages[capture_id] = stage["id"]
-                    notify("dictationReady", id=stage["id"])
+                    if "releaseFrame" in capture:
+                        self.dictation_release_frames[stage["id"]] = capture["releaseFrame"]
+                    notify("dictationReady", id=stage["id"], interrupted=bool(reason and reason != "Stopped"),
+                           seconds=max(0, path.stat().st_size - 44) / 96000, reason=reason, **interruption)
                 else:
                     await self.api("DELETE", "native/staging/" + stage["id"])
                     if not capture.get("discard"):
-                        notify("error", message=reason or "No microphone audio was captured.", **permission)
+                        message = reason if reason and reason != "Stopped" else "Hold the shortcut a little longer to capture audio."
+                        notify("error", message=message, noSpeech=not permission and reason in (None, "", "Stopped"),
+                               **permission, **interruption, **({"openingAbandoned": True} if opening_abandoned else {}))
                 return
             if path.is_file() and path.stat().st_size > 44:
                 notify("finished", reason=reason or "Stopped")
+                prefix = "Recording"
+                if meeting:
+                    label = capture["meetingLabel"]
+                    prefix = "Meeting" if label == "Meeting" else f"{label} meeting"
                 data = await self.submit(
                     stage["id"],
-                    self.settings,
-                    name=datetime.datetime.now().strftime(
-                        "Recording %Y-%m-%d %H.%M.%S"
-                    ),
+                    take.settings,
+                    name=f"{prefix} {datetime.datetime.now():%Y-%m-%d %H.%M.%S}",
                     mime="audio/wav",
                     recording=True,
                     recover=True,
                 )
-                notify("accepted", id=data["id"])
+                notify("accepted", id=data["id"], **({"interruption": reason} if meeting and reason and reason != "Stopped" else {}))
             else:
                 await self.api("DELETE", "native/staging/" + stage["id"])
                 notify(
@@ -439,20 +1177,33 @@ class MacBridge:
                     **permission,
                 )
         except (httpx.HTTPError, OSError) as e:
+            recoverable = {}
+            if meeting:
+                with contextlib.suppress(OSError):
+                    if path.stat().st_size > 44:
+                        recoverable["draft"] = stage["id"]
             notify(
                 "error",
                 message=explain(e) if capture_id else "The recording was preserved for recovery. " + explain(e),
+                **recoverable,
             )
         finally:
-            self.stage_lock.close()
-            self.stage_lock = None
-            self.stage = self.capture_session = None
+            take.marker.close()
+            self.captures.pop(slot)
+            asyncio.create_task(self.reconcile_warm())
 
-    async def stop(self):
-        child = self.recorder
-        if child and child.returncode is None:
+    @staticmethod
+    async def stop(take, *, release_tail=False, release_at=None):
+        take.stop_titles()
+        child = take.child
+        if not take.finished and child.returncode is None:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                child.stdin.write(b"stop\n")
+                command = "finish" if release_tail else "stop"
+                if take.state.get("warm") and take.state.get("discard"):
+                    command = "cancel"
+                if command == "finish" and type(release_at) in (int, float) and 0 < release_at < math.inf:
+                    command += f" {release_at:.9f}"
+                child.stdin.write((command + "\n").encode("ascii"))
                 await child.stdin.drain()
 
     async def discard_dictation(self, key):
@@ -465,17 +1216,31 @@ class MacBridge:
             if error.response.status_code != 404:
                 raise
         self.dictation_stages.pop(owner, None)
+        self.dictation_release_frames.pop(key, None)
 
     async def export(self, args):
         key, kind = str(UUID(args["id"])), args["kind"]
-        if kind not in ("audio", "json"):
+        annotation_kind = kind.removeprefix("annotation-") if isinstance(kind, str) and kind.startswith("annotation-") else ""
+        if kind not in ("audio", "json", "md", "notes", "srt", "vtt") and annotation_kind not in ANNOTATION_ASSETS:
             raise ValueError("Unsupported export format.")
         session = await self.api("GET", "sessions/" + key)
-        name = (
-            session["audioName"]
-            if kind == "audio"
-            else Path(session["audioName"]).stem + ".json"
-        )
+        data = None
+        if annotation_kind:
+            name = Path(session["audioName"]).stem + "-" + ANNOTATION_ASSETS[annotation_kind][0]
+            response = await self.http.get(f"/api/sessions/{key}/annotation/{annotation_kind}")
+            response.raise_for_status()
+            data = response.content
+        elif kind == "audio":
+            if not session.get("audioPath"):
+                raise ValueError("The audio has been removed from this meeting.")
+            name = session["audioName"]
+        elif kind == "json":
+            name = Path(session["audioName"]).stem + ".json"
+        else:
+            response = await self.http.get(f"/api/sessions/{key}/export", params={"kind": kind})
+            response.raise_for_status()
+            name = unquote(response.headers["Content-Disposition"].split("UTF-8''", 1)[1])
+            data = response.content
         choice = (await self.dialog("save", name)).get("path")
         if not choice:
             return None
@@ -491,6 +1256,8 @@ class MacBridge:
             try:
                 if kind == "audio":
                     shutil.copyfile(self.root / session["audioPath"], partial)
+                elif data is not None:
+                    partial.write_bytes(data)
                 else:
                     partial.write_text(
                         json.dumps(
@@ -505,50 +1272,486 @@ class MacBridge:
         await asyncio.to_thread(write)
         return {"saved": True}
 
+    async def meeting_exports(self, args):
+        action = args.get("action")
+        if action == "reveal" and args.get("id"):
+            key = str(UUID(args["id"]))
+            result = await self.api("GET", f"native/meeting-exports/{key}")
+            await run_helper("/usr/bin/open", "-R", result["path"])
+            return {"folder": str(Path(result["path"]).parent)}
+        if action == "separateNotes":
+            return await self.api("PUT", "native/meeting-exports/notes", json={"enabled": args.get("enabled")})
+        if action == "descriptiveNames":
+            return await self.api("PUT", "native/meeting-exports/descriptive", json={"enabled": args.get("enabled")})
+        if action not in ("status", "choose", "disable", "reveal"):
+            raise ValueError("Choose a meeting export action.")
+        route = "native/meeting-exports"
+        if action == "disable":
+            return await self.api("PUT", route, json={"folder": None})
+        status = await self.api("GET", route)
+        if action == "choose":
+            choice = (await self.dialog("meeting-export-folder", status["folder"] or "")).get("path")
+            if choice:
+                return await self.api("PUT", route, json={"folder": choice})
+        if action == "reveal" and status["folder"]:
+            await run_helper("/usr/bin/open", status["folder"])
+        return status
+
+    async def annotation_lease(self, args):
+        active = args.get("active") is True
+        if active:
+            require_annotation()
+        key = str(UUID(args["id"]))
+        async with self.capture_lock:
+            if active:
+                if self.updating or self.annotation or self.captures or self.dictation_stages or self.dictation_jobs or self.sdk_capture.active:
+                    raise ValueError("Finish the active recording or dictation first.")
+                await self.close_warm()
+                self.annotation = key
+                self.annotation_started_at = time()
+            elif self.annotation == key:
+                self.annotation = None
+                self.annotation_started_at = None
+                asyncio.create_task(self.reconcile_warm())
+        return {"active": self.annotation == key}
+
+    async def import_annotation(self, args):
+        require_annotation()
+        key = str(UUID(args["id"]))
+        source = Path(args["path"])
+        if self.annotation != key or not source.is_absolute() or source.name != "Screen annotation.mp4" or (
+            source.parent.name != "jard-annotation-" + key or source.is_symlink()
+        ):
+            raise ValueError("This screen annotation is unavailable.")
+        if not source.is_file():
+            raise ValueError("The screen recording did not produce a video.")
+        assets = args.get("assets") is True
+        start = self.annotation_started_at
+        origin = annotation_origin(args.get("routeOrigin")) if assets else None
+        stage = await self.api("POST", "native/staging", params={"annotation_id": key})
+        try:
+            target = Path(stage["path"])
+            def copy_annotation():
+                shutil.copyfile(source, target)
+                if assets:
+                    for kind, destination in staged_annotation_paths(target).items():
+                        original = source.with_name(ANNOTATION_ASSETS[kind][0])
+                        if kind == "manifest" or original.exists():
+                            shutil.copyfile(annotation_input(original, kind), destination)
+                            destination.chmod(0o600)
+
+            await asyncio.to_thread(copy_annotation)
+            result = await self.submit(stage["id"], {**self.options(args), "annotation": str(assets).lower()}, name=source.name,
+                                       mime="video/mp4", recording=False)
+            try:
+                await self.automatic_annotations.enqueue(key, origin, start)
+            except (ValueError, OSError):
+                # Routing preferences do not affect whether the local recording was saved.
+                pass
+            return result
+        except BaseException:
+            with contextlib.suppress(httpx.HTTPError):
+                await self.api("DELETE", "native/staging/" + stage["id"])
+            raise
+
+    def annotation_handoff(self, key):
+        library = SessionStore(self.root, read_only=True)
+        try:
+            detail = annotation_detail(library, key)
+        except MissingSession as error:
+            raise ValueError("Annotation not found.") from error
+        markdown = annotation_context(detail)["markdown"]
+        if len(json.dumps(markdown, ensure_ascii=False).encode()) > 3 * 1024 * 1024:
+            raise ValueError("This annotation is too long to copy from Jard. Use jardctl annotate context.")
+        return {"markdown": markdown, "imagePath": detail["contactSheetPath"]}
+
+    async def annotation_routes(self, action, args):
+        capture = args.get("id")
+        if action == "destinations":
+            return await annotation_destinations(args.get("query", ""), root=self.root, capture=capture)
+        if action == "remember":
+            return await set_destination_rule(self.root, capture, args.get("scope"), args.get("target"), args.get("service"), args.get("automatic", False))
+        return await asyncio.to_thread(forget_destination_rule, self.root, capture, args.get("ruleId"))
+
+    async def automatic_capture(self, identifier):
+        return await self.api("GET", f"sessions/{identifier}")
+
+    async def automatic_send(self, capture, target, service, authorize):
+        require_opencode()
+        if self.annotation_delivery_busy or self.updating:
+            raise RouteUnavailable("Another annotation operation is in progress.")
+        return await self.change_annotation_delivery(send_annotation, capture, target, service, authorize=authorize)
+
+    async def annotation_route(self, args):
+        identifier = str(UUID(args["id"]))
+        action = args.get("action", "status")
+        if action not in ("status", "cancel"):
+            raise ValueError("Choose annotation routing status or cancel.")
+        if action == "cancel":
+            await self.automatic_annotations.cancel(identifier)
+        return await self.automatic_annotations.query(identifier)
+
+    async def change_annotation_delivery(self, operation, *values, **options):
+        require_opencode()
+        if self.annotation_delivery_busy or self.updating:
+            raise ValueError("Wait for the current annotation delivery or restart to finish.")
+        self.annotation_delivery_busy = True
+        try:
+            return await operation(self.root, *values, **options)
+        except MissingSession as error:
+            raise ValueError("Annotation not found.") from error
+        finally:
+            self.annotation_delivery_busy = False
+
+    async def deliver_annotation(self, args):
+        require_opencode()
+        detail = await asyncio.to_thread(capture_for_routing, self.root, args.get("id"))
+        identifier = detail["id"]
+        await self.automatic_annotations.cancel(identifier, "Automatic send replaced by a manual send.")
+        return await self.change_annotation_delivery(send_annotation, identifier, args.get("target"), args.get("service"))
+
+    async def rewrite_dictation(self, text, instruction, vocabulary, deadline, *, application="", browser_host=""):
+        if not instruction:
+            raise ValueError("Set rewrite instructions in Dictation Settings.")
+        try:
+            result = await self.api("POST", "native/dictation-rewrite",
+                                    json={"text": text, "instruction": instruction, "vocabulary": vocabulary,
+                                          "deadline": deadline, "application": application, "browserHost": browser_host})
+        except httpx.HTTPError as error:
+            raise ValueError(explain(error)) from error
+        return result["text"]
+
+    async def quiesce_for_update(self):
+        async with self.capture_lock:
+            if self.annotation_delivery_busy:
+                raise ValueError("Wait for the annotation delivery to finish before restarting.")
+            if self.annotation or self.captures or self.dictation_stages or self.dictation_jobs or self.sdk_capture.active:
+                raise ValueError("Finish your recording or dictation before restarting Jard.")
+            self.updating = True
+            await self.automatic_annotations.close()
+            try:
+                await self.api("POST", "native/update-quiesce/" + self.client_id)
+                await self.close_warm()
+                for _ in range(40):
+                    try:
+                        _, writer = await asyncio.open_connection(HOST, PORT)
+                    except ConnectionRefusedError:
+                        return {"ready": True}
+                    writer.close()
+                    await writer.wait_closed()
+                    await asyncio.sleep(0.2)
+                raise RuntimeError("The local engine is still shutting down. Try restarting again.")
+            except BaseException:
+                self.updating = False
+                with contextlib.suppress(ValueError, OSError):
+                    await self.automatic_annotations.resume()
+                raise
+
+    async def quiesce_desktop(self, *, force=False):
+        async with self.capture_lock:
+            if self.annotation_delivery_busy:
+                raise ValueError("Wait for the annotation delivery to finish before closing.")
+            if self.annotation or (not force and (self.captures or self.dictation_stages or self.dictation_jobs or self.sdk_capture.active)):
+                raise ValueError("Finish your recording or dictation before closing Jard.")
+            self.updating = True
+            await self.automatic_annotations.close()
+            captures = list(self.captures.values())
+            if force and (dictation := self.captures.get("dictation")):
+                dictation.state["discard"] = True
+        try:
+            if force:
+                await self.sdk_capture.stop_for_exit()
+                if not await self.finish_recorder_jobs(captures):
+                    raise RuntimeError("Jard is still saving a recording. Try again once it finishes.")
+            await self.close_warm()
+        except BaseException:
+            self.updating = False
+            with contextlib.suppress(ValueError, OSError):
+                await self.automatic_annotations.resume()
+            raise
+        return {"ready": True}
+
     async def dispatch(self, command, args):
         if command == "jard.prepare":
             return await self.prepare()
         if command == "jard.setup":
             return await self.setup(args.get("source"))
+        if command == "jard.diagnosticPhase":
+            phase = args.get("phase")
+            if self.connected and phase in ("starting", "listening", "processing", "inserted", "saved", "cancelled", "empty", "error"):
+                write_event("dictation", phase)
+            return None
         if not self.connected:
             raise ValueError("Open the local workspace first.")
+        if command == "jard.annotationLease":
+            return await self.annotation_lease(args)
+        if command == "jard.importAnnotation":
+            return await self.import_annotation(args)
+        if command == "jard.annotationRoutingPolicy":
+            return {"managed": opencode_managed()}
+        if command == "jard.annotationRoute":
+            return await self.annotation_route(args)
+        if command == "jard.annotationRoutePanel":
+            await self.automatic_annotations.panel_action(args.get("capture"), args.get("action"), args.get("held") is True)
+            return None
+        if command == "jard.annotationHandoff":
+            return await asyncio.to_thread(self.annotation_handoff, str(UUID(args["id"])))
+        route_action = {"jard.annotationDestinations": "destinations", "jard.rememberAnnotationDestination": "remember",
+                        "jard.forgetAnnotationDestination": "forget"}.get(command)
+        if route_action:
+            return await self.annotation_routes(route_action, args)
+        if command == "jard.sendAnnotation":
+            return await self.deliver_annotation(args)
+        if command == "jard.annotationDeliveries":
+            return await asyncio.to_thread(recent_deliveries, self.root, args.get("id"))
+        if command == "jard.undoAnnotationDelivery":
+            return await self.change_annotation_delivery(undo_annotation, args.get("deliveryId"),
+                                                         restore_files=args.get("restoreFiles") is True)
+        if command == "jard.correctAnnotationDelivery":
+            return await self.change_annotation_delivery(correct_annotation, args.get("deliveryId"))
+        if command == "jard.controlReply":
+            future = self.control_pending.get(args.get("id"))
+            if future and not future.done():
+                future.set_result(args.get("response"))
+            return None
+        if command == "jard.updateQuiesce":
+            return await self.quiesce_for_update()
+        if command == "jard.desktopQuiesce":
+            return await self.quiesce_desktop(force=args.get("force") is True)
+        if command == "jard.updateAbort":
+            self.updating = False
+            return await self.prepare()
+        if command == "jard.findOutputConfig":
+            policy = current_policy()
+            if policy == TransformPolicy.DISABLED:
+                return {"policy": policy, "message": DISABLED_MESSAGE}
+            path = await asyncio.to_thread(find_config, config_directory())
+            return {"name": path.name if path else "", "policy": policy}
+        if command == "jard.createOutputConfig":
+            if current_policy() == TransformPolicy.DISABLED:
+                raise ValueError(DISABLED_MESSAGE)
+            return await asyncio.to_thread(initialize_workspace)
+        if command in ("jard.inspectOutputScript", "jard.outputScriptApproval"):
+            path = args.get("path", "")
+            if not isinstance(path, str) or len(path) > 4096:
+                raise ValueError("Select an executable local script in Dictation Settings.")
+            if command == "jard.inspectOutputScript":
+                policy = current_policy()
+                if policy == TransformPolicy.DISABLED:
+                    return {"policy": policy, "message": DISABLED_MESSAGE}
+                if is_embedded_config(path):
+                    review = await self.transform_configs.inspect(path, fresh=args.get("fresh") is True)
+                elif policy == TransformPolicy.LOOPBACK:
+                    review = {"kind": "executable", "message": PROGRAM_MESSAGE}
+                else:
+                    review = await asyncio.to_thread(review_output_script, path)
+                return {**review, "policy": policy}
+            digest = args.get("digest", "")
+            if not isinstance(digest, str) or (digest and (
+                len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+            )):
+                raise ValueError("Invalid output script approval.")
+            grants = args.get("grants", {})
+            if not isinstance(grants, dict) or set(grants) - set(CAPABILITIES) or any(type(value) is not bool for value in grants.values()):
+                raise ValueError("Invalid transformation permissions.")
+            allowed = frozenset(key for key, granted in grants.items() if granted)
+            if allowed and (not digest or not is_embedded_config(path)):
+                raise ValueError("Invalid transformation permissions.")
+            self.approved_output_script = (path, digest, allowed)
+            return None
+        if command == "jard.output":
+            text = args.get("text", "")
+            if not isinstance(text, str) or len(text) > 8_000:
+                raise ValueError("The output preview is too large.")
+            profiles = parse_profiles(args.get("profiles", ""))
+            if args.get("describe") is True:
+                return {"profiles": [vars(profile) for profile in profiles]}
+            profile = profile_for(profiles, args.get("app", ""), args.get("bundle", ""), args.get("site", ""))
+            vocabulary = merge_vocabulary(profile.vocabulary if profile else (), vocabulary_terms(args.get("vocabulary", [])))
+            instruction = (profile.instruction if profile else "") or args.get("instruction", "")
+            steps = profile.steps if profile else ()
+            builtins_only = args.get("builtinsOnly") is True
+            policy = current_policy()
+            skipped = tuple(dict.fromkeys(step for step in steps if builtins_only and
+                            (step == "rewrite" or is_script_step(step) or
+                             (policy == TransformPolicy.DISABLED and is_transform_step(step)))))
+            deadline = profile.deadline if profile else MAX_REWRITE_DEADLINE
+            processed = await process_output(
+                text, steps, args.get("replacements", ""), preview=True,
+                rewrite=lambda value: self.rewrite_dictation(value, instruction, vocabulary, deadline),
+                corrections=profile.corrections if profile else "", builtins_only=builtins_only, aliases=args.get("aliases", ()),
+            )
+            return {"text": processed.text, "warnings": processed.warnings, "steps": steps,
+                    "profile": profile.target if profile else "", "vocabulary": vocabulary,
+                    **({"skipped": skipped} if builtins_only else {})}
+        if command == "jard.warm":
+            return await self.warm(args)
         if command == "jard.devices":
             return await self.devices()
         if command == "jard.record":
             return await self.record(args)
+        if command == "jard.copyMeeting":
+            return await self.copy_meeting_through_now(args)
+        if command == "jard.meetingInput":
+            return await self.select_meeting_input(args)
+        if command == "jard.meetingExports":
+            return await self.meeting_exports(args)
+        if command == "jard.latestMeeting":
+            response = await self.http.get("/api/sessions", params={"meetings": "true"})
+            response.raise_for_status()
+            rows = response.json()
+            latest = max(rows, key=lambda row: (row.get("meetingStartedAt") or row["created"], row["id"]), default=None)
+            return {"session": latest["id"] if latest else None,
+                    "recovering": response.headers.get("X-Jard-Meeting-Recovery") == "pending"}
+        if command == "jard.meetingExcerpt":
+            key = str(UUID(args["session"]))
+            try:
+                return await self.api("GET", f"native/meetings/{key}/excerpt")
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code == 404:
+                    return {"available": False, "settled": True, "turns": []}
+                raise
+        if command == "jard.meetingCompletion":
+            key = str(UUID(args["session"]))
+            try:
+                return await self.api("GET", f"native/meetings/{key}/completion", timeout=5)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code == 404:
+                    return {"status": "unavailable"}
+                raise
+        if command == "jard.meetingMarkdown":
+            key = str(UUID(args["session"]))
+            response = await self.http.get(f"/api/sessions/{key}/export", params={"kind": "md"})
+            response.raise_for_status()
+            if len(response.content) > 2 * 1024 * 1024:
+                raise ValueError("Open Sessions to export this longer meeting.")
+            return {"text": response.text}
+        if command == "jard.stopMeeting":
+            expected = str(UUID(args["meeting"]))
+            async with self.capture_lock:
+                take = self.captures.get("recording")
+                if not take or take.state.get("meeting") != expected:
+                    raise ValueError("This meeting is no longer active.")
+                await self.stop(take)
+            await asyncio.shield(take.job)
+            return None
+        if command == "jard.meetingTranscript":
+            key = str(UUID(args["session"]))
+            session = await self.api("GET", "sessions/" + key)
+            if session.get("status") == "processing":
+                raise ValueError("The meeting transcript is still processing.")
+            transcript = session.get("transcript") or {}
+            text = transcript.get("text", "").strip()
+            if not session.get("meeting") or not text or len(text) > 500_000:
+                raise ValueError("There is no meeting transcript to copy here. Check Sessions.")
+            labels = transcript.get("speakerNames", {})
+            labeled = "\n".join(f"{labels.get(str(turn['speaker']), 'Speaker ' + str(turn['speaker']))}: {turn['text']}"
+                                if turn["speaker"] is not None else turn["text"]
+                                for turn in transcript["segments"]) if labels else text
+            return {"text": text, "labeledText": labeled}
         if command == "jard.stop":
-            await self.stop()
-            if self.job:
-                await asyncio.shield(self.job)
+            if take := self.workspace_capture():
+                await self.stop(take)
+                await asyncio.shield(take.job)
             return None
         if command == "jard.dictation":
             action = args.get("action")
-            if action in ("stop", "cancel"):
-                capture = self.capture_session
-                if capture and capture.get("dictation") == args.get("id"):
-                    capture["discard"] = action == "cancel"
-                    await self.stop()
-                    await asyncio.shield(self.job)
-                if action == "cancel" and (key := self.dictation_stages.get(args.get("id"))):
-                    await self.discard_dictation(key)
-                return None
             key = str(UUID(args["id"]))
+            if action in ("stop", "cancel"):
+                take = self.captures.get("dictation")
+                if take and take.state.get("dictation") == key:
+                    if action == "cancel":
+                        take.state["discard"] = True
+                    await self.stop(take, release_tail=action == "stop" and args.get("releaseTail") is True,
+                                    release_at=args.get("releaseAt"))
+                    await asyncio.shield(take.job)
+                if action == "cancel" and (stage := self.dictation_stages.get(key)):
+                    await self.discard_dictation(stage)
+                return None
             if action == "discard":
                 return await self.discard_dictation(key)
             if action == "transcribe":
                 if key not in self.dictation_stages.values():
                     raise ValueError("This dictation is unavailable.")
-                text = await self.api("POST", "native/staging/" + key + "/dictate",
-                                      params=self.options(args))
-                with contextlib.suppress(httpx.HTTPError):
-                    await self.discard_dictation(key)
-                return text
+                if key in self.dictation_jobs:
+                    raise ValueError("This dictation is already being transcribed.")
+                vocabulary = vocabulary_terms(args.get("vocabulary", []))
+                succeeded = False
+                self.dictation_jobs.add(key)
+                try:
+                    settings = args.get("outputProfile") or {}
+                    profile = None
+                    warning = None
+                    if isinstance(settings, dict) and settings.get("rules"):
+                        try:
+                            profile = profile_for(parse_profiles(settings["rules"]), settings.get("app", ""),
+                                                  settings.get("bundle", ""), settings.get("site", ""),
+                                                  bundle_name=settings.get("bundleName", ""))
+                        except ValueError as error:
+                            warning = str(error)
+                    vocabulary = merge_vocabulary(profile.vocabulary if profile else (), vocabulary)
+                    params = {**self.options(args), "vocabulary": vocabulary}
+                    if key in self.dictation_release_frames:
+                        params["release_frame"] = self.dictation_release_frames[key]
+                    result = await self.api("POST", "native/staging/" + key + "/dictate",
+                                            params=params)
+                    succeeded = True
+                    write_event("dictation", "inference_complete", inference_ms=result.get("inferenceMs"))
+                    if not result.get("text"):
+                        return result
+                    if profile:
+                        result["profile"] = profile.target
+                    if profile and (profile.steps or profile.corrections):
+                        instruction = profile.instruction or settings.get("instruction", "")
+                        script = settings.get("script") or ""
+                        script_digest = settings.get("scriptDigest") or ""
+                        grants = settings.get("scriptGrants", {})
+                        if not isinstance(grants, dict):
+                            grants = {}
+                        allowed = frozenset(key for key in CAPABILITIES if grants.get(key) is True)
+                        expected_approval = (script, script_digest, allowed)
+                        script_context = {"source": "dictation", **{key: settings[field] for key, field in
+                            (("application", "app"), ("browserHost", "site")) if settings.get(field)}}
+                        if ("pageContext" in allowed and is_embedded_config(script) and
+                                self.approved_output_script == expected_approval):
+                            for field, limit in (("browserUrl", 4096), ("windowTitle", 1024)):
+                                value = settings.get(field)
+                                if isinstance(value, str) and value and len(value.encode("utf-8", errors="replace")) <= limit:
+                                    script_context[field] = value
+                        processed = await process_output(
+                            result["text"], profile.steps, settings.get("replacements", ""), script,
+                            rewrite=lambda value: self.rewrite_dictation(
+                                value, instruction, vocabulary, profile.deadline,
+                                application=settings.get("app", ""), browser_host=settings.get("site", ""),
+                            ),
+                            corrections=profile.corrections, aliases=settings.get("aliases", ()),
+                            script_digest=script_digest, script_allowed=lambda: self.approved_output_script == expected_approval,
+                            script_grants={key: key in allowed for key in CAPABILITIES},
+                            script_runtime=self.helpers / "jaro-transforms",
+                            script_context=script_context,
+                        )
+                        result["processed"] = processed.text
+                        if observation := processed.processing:
+                            result["processing"] = {
+                                "latencyMs": observation.latency_ms, "fallbacks": observation.fallbacks,
+                            }
+                            if observation.rewrite_attempted:
+                                result["processing"]["model"] = REWRITE_MODEL_NAME
+                        warning = " ".join(processed.warnings)
+                    if warning:
+                        result["outputWarning"] = warning
+                    return result
+                finally:
+                    if succeeded or args.get("cleanupOnFailure") is True:
+                        with contextlib.suppress(httpx.HTTPError):
+                            await self.discard_dictation(key)
+                    self.dictation_jobs.discard(key)
             raise ValueError("Unsupported dictation action.")
         if command == "jard.live":
             enabled = args.get("enabled") is True
-            if self.capture_session:
-                self.capture_session["live"] = enabled
-            self.settings["live"] = str(enabled).lower()
+            if take := self.workspace_capture():
+                take.state["live"] = enabled
+                take.settings["live"] = str(enabled).lower()
             return None
         if command == "jard.openAudio":
             return await self.open_audio(args)
@@ -559,23 +1762,40 @@ class MacBridge:
                 raise ValueError("Local engine is unavailable.")
             await run_helper("/usr/bin/open", URL)
             return None
-        if command in ("jard.discard", "jard.recover"):
-            key = str(UUID(args["id"]))
-            if self.stage and key == self.stage["id"]:
-                raise ValueError("Stop the recording first.")
+        if command == "jard.meetingDrafts":
+            if meetings_managed():
+                return []
             drafts = await self.api("GET", "native/staging")
-            if not any(d["id"] == key for d in drafts):
-                raise ValueError("Recording draft is unavailable.")
-            if command == "jard.discard":
-                return await self.api("DELETE", "native/staging/" + key)
-            return await self.submit(
-                key,
-                self.options(args),
-                name="Recovered recording",
-                mime="audio/wav",
-                recording=True,
-                recover=True,
-            )
+            return [{"id": draft["id"], "provider": draft.get("provider") or "Meeting",
+                     **({"title": draft["meetingTitle"]} if draft.get("meetingTitle") else {})}
+                    for draft in drafts if draft.get("meeting")][:20]
+        if command in ("jard.discard", "jard.recover", "jard.recoverMeeting"):
+            if command == "jard.recoverMeeting":
+                require_meetings()
+            key = str(UUID(args["id"]))
+            async with self.capture_lock:
+                if self.updating or self.captures or self.annotation:
+                    raise ValueError("Finish the active recording or update first.")
+                drafts = await self.api("GET", "native/staging")
+                draft = next((d for d in drafts if d["id"] == key), None)
+                if not draft or (command == "jard.recoverMeeting" and not draft.get("meeting")):
+                    raise ValueError("Recording draft is unavailable.")
+                if draft.get("meeting") and command != "jard.discard":
+                    require_meetings()
+                with Path(draft["path"]).with_suffix(".recording").open("rb") as claim:
+                    try:
+                        fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        raise ValueError("This recording is already being recovered.") from None
+                    if command == "jard.discard":
+                        return await self.api("DELETE", "native/staging/" + key)
+                    result = await self.submit(
+                        key, self.options(args), name="Recovered meeting" if draft.get("meeting") else "Recovered recording",
+                        mime="audio/wav", recording=True, recover=True,
+                    )
+                    if command == "jard.recoverMeeting":
+                        emit("accepted", id=result["id"], meeting=key)
+                    return result
         raise ValueError("Unsupported native action.")
 
     async def reply(self, message):
@@ -601,18 +1821,29 @@ class MacBridge:
             }
         send({"response": response})
 
-    async def close(self):
-        if self.capture_session and self.capture_session.get("dictation"):
-            self.capture_session["discard"] = True
-        await self.stop()
-        if self.job:
+    async def finish_recorder_jobs(self, captures):
+        await asyncio.gather(*(self.stop(take) for take in captures))
+
+        async def finish(take):
             try:
-                await asyncio.wait_for(asyncio.shield(self.job), 15)
+                await asyncio.wait_for(asyncio.shield(take.job), 15)
             except TimeoutError:
-                if self.recorder and self.recorder.returncode is None:
-                    self.recorder.kill()
+                if not take.finished and take.child.returncode is None:
+                    take.child.kill()
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(self.job), 15)
+                    await asyncio.wait_for(asyncio.shield(take.job), 15)
+
+        await asyncio.gather(*(finish(take) for take in captures))
+        return all(take.job.done() for take in captures)
+
+    async def close(self):
+        await self.automatic_annotations.close()
+        self.warm_requested = None
+        await self.close_control()
+        if dictation := self.captures.get("dictation"):
+            dictation.state["discard"] = True
+        await self.finish_recorder_jobs(list(self.captures.values()))
+        await self.reconcile_warm()
         for key in list(self.dictation_stages.values()):
             with contextlib.suppress(httpx.HTTPError):
                 await self.discard_dictation(key)
@@ -623,6 +1854,7 @@ class MacBridge:
         if self.connected:
             with contextlib.suppress(httpx.HTTPError):
                 await self.api("DELETE", "clients/" + self.client_id)
+            write_event("desktop", "disconnected")
 
 
 async def main():

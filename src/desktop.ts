@@ -1,4 +1,5 @@
 import type { SpeakerSegment } from "./audio"
+import type { DictationAction, DictationHistory, DictationOutputPreview, DictationOutputProfiles, DictationScriptReview, DictationStatus } from "./system-dictation"
 
 export type RecordingMode = "both" | "mic" | "system"
 export type CaptureSource = Exclude<RecordingMode, "both">
@@ -15,6 +16,142 @@ export const RECORDING_MODES: Record<RecordingMode, string> = {
   system: "Mac audio only",
 }
 
+export type DesktopAnnotationSource = "display" | "window" | "area" | "phone"
+
+export type DesktopAnnotation = {
+  phase: "idle" | "starting" | "picking" | "selecting" | "recording" | "saving" | "cancelling" | "finished" | "cancelled" | "error"
+  message: string
+  session: string
+  recoverable: boolean
+  busy: boolean
+  managed?: boolean
+}
+
+export type OpenCodeSession = { id: string; title: string; directory: string }
+export type AnnotationRouteScope = { kind: "app" | "site" | "terminal"; key: string; label: string }
+export type AnnotationDestinationRule = {
+  id: string; scope: AnnotationRouteScope; title: string; target: string; channel: string; automatic?: boolean
+}
+export type AnnotationDestinations = {
+  service: string | null
+  sessions: OpenCodeSession[]
+  warning?: string
+  scopes?: AnnotationRouteScope[]
+  rule?: (AnnotationDestinationRule & { available: boolean }) | null
+  suggestion?: { sessionId: string; reason: string } | null
+}
+export type AnnotationRouteStatus = {
+  capture: string
+  phase: "idle" | "transcribing" | "waiting" | "offer" | "countdown" | "held" | "preparing" | "sending" | "sent" | "cancelled" | "failed" | "unconfirmed"
+  title?: string
+  message?: string
+  seconds?: number
+}
+export type AnnotationDelivery = {
+  deliveryId: string
+  annotation: string
+  service: string
+  session: OpenCodeSession
+  message: string | null
+  status: "queued" | "withdrawn" | "received" | "missing" | "unconfirmed" | "withdrawal-unconfirmed" | "refused"
+    | "corrected" | "correction-unconfirmed" | "reverted" | "rollback-files" | "rollback-staged"
+    | "rollback-unconfirmed" | "rollback-commit-unconfirmed"
+  includedSheet: boolean
+  createdAt: number
+  undoUntil: number
+  canUndo: boolean
+  correctionMessage: string | null
+  canCorrect: boolean
+}
+
+export type DesktopUpdateChannel = "stable" | "dev"
+export type DesktopDockIcon = { enabled: boolean; menuBarAvailable: boolean }
+export type DesktopLoginAction = { action: "status" | "openSettings" } | { action: "set"; enabled: boolean }
+export type DesktopLoginItem = { state: "enabled" | "disabled" | "approval" | "unknown"; message?: string }
+export type DesktopInterfaceLanguage = { selected: string; resolved: string; choices: Record<string, string>; messages: Record<string, string> }
+export type DesktopUpdateAction = { action: "status" | "restart" | "download" | "check" }
+  | { action: "channel"; channel: DesktopUpdateChannel }
+  | { action: "confirmSwitch"; offer: string }
+  | { action: "releaseNotes"; version: string; channel: DesktopUpdateChannel }
+export type DesktopUpdate = {
+  phase: "idle" | "unavailable" | "checking" | "current" | "downloading" | "staging" | "ready" | "download" | "applying" | "error" | "switch"
+  version?: string
+  currentVersion?: string
+  notes?: string
+  message?: string
+  installedChannel?: DesktopUpdateChannel
+  channel?: DesktopUpdateChannel
+  channels?: DesktopUpdateChannel[]
+  channelManaged?: boolean
+  updatesDisabled?: boolean
+  restartBlocked?: boolean
+  staged?: boolean
+  stageChannel?: DesktopUpdateChannel
+  releaseNotesAvailable?: boolean
+  offer?: string
+  manualCheck?: boolean
+  openUpdateSettings?: string
+}
+
+export type DesktopMeetingCalendar = {
+  access: "granted" | "notDetermined" | "denied"
+  connected: boolean; reminders: boolean; lead: number
+  calendars: { id: string; title: string; source: string; included: boolean }[]
+  upcoming: { id: string; title: string; start: number; end: number; provider: string; canJoin: boolean }[]
+}
+
+export type DesktopMeetingAudioAccess = {
+  authorization: "granted" | "request" | "denied" | "unknown"
+  screen: boolean
+  canRepair: boolean
+  busy: boolean
+}
+
+export type MeetingRecordingPolicy = "ask" | "auto" | "never"
+
+export type DesktopMeeting = {
+  phase: "idle" | "offered" | "reminder" | "starting" | "recording" | "callEnded" | "saving" | "finished" | "error" | "permission" | "interrupted"
+  message: string
+  detection: boolean
+  managed?: boolean
+  busy: boolean
+  provider: string
+  title?: string
+  session: string
+  hasText: boolean
+  hasNewText: boolean
+  copying?: boolean
+  copyPartial?: boolean
+  autoStop?: boolean
+  autoStopSeconds?: number
+  calendar?: DesktopMeetingCalendar
+  showIndicator?: boolean
+  indicatorCorner?: MeetingIndicatorCorner
+  permission?: CaptureSource | ""
+  recoveryAvailable?: boolean
+  microphoneSilent?: boolean
+  systemAudioUnavailable?: boolean
+  microphone?: string
+  providerPolicies: { provider: string; label: string; scope?: string; policy: MeetingRecordingPolicy; canAlwaysRecord: boolean }[]
+}
+
+export type MeetingIndicatorCorner = "topLeft" | "topRight" | "bottomLeft" | "bottomRight"
+
+export type DesktopMeetingAction =
+  | { action: "status" | "stop" | "copyNew" | "copyAll" }
+  | { action: "start"; languages: string[] }
+  | { action: "detection"; enabled: boolean }
+  | { action: "indicator"; enabled: boolean }
+  | { action: "indicatorCorner"; corner: MeetingIndicatorCorner }
+  | { action: "retryPermission" | "recordingPrivacy" | "dismissPermission" | "recoverMeeting" | "dismissRecovery" | "refreshRecovery" }
+  | { action: "showLiveTranscript" }
+  | { action: "setPolicy"; provider: string; policy: MeetingRecordingPolicy }
+  | { action: "keepRecording" | "calendarConnect" | "calendarDisconnect" | "calendarSettings" }
+  | { action: "autoStop" | "calendarReminders"; enabled: boolean }
+  | { action: "calendarLead"; minutes: number }
+  | { action: "calendarInclude"; enabled: boolean; id: string }
+  | { action: "calendarEvent"; id: string; choice: "join" | "record" | "joinRecord" | "dismiss" }
+
 type WindowChrome = { controlsEnd: number; controlsCenterY: number; fullscreen: boolean }
 
 function applyWindowChrome(chrome: WindowChrome) {
@@ -25,9 +162,35 @@ function applyWindowChrome(chrome: WindowChrome) {
 }
 
 type CaptureOptions = { diarization: boolean; languages: string[] }
-export type RecordingDraft = { id: string; seconds: number }
-type ActiveCapture = { dictation?: string; mode: RecordingMode; live: boolean; seconds?: number; text?: string; segments?: SpeakerSegment[] }
+export type RecordingDraft = { id: string; seconds: number; meeting?: boolean }
+type ActiveCapture = { dictation?: string; meeting?: string; mode: RecordingMode; live: boolean; seconds?: number; text?: string; segments?: SpeakerSegment[] }
+export type DictationDestination = "dictation" | "history" | "output"
+export type WindowNavigation = {
+  id: string
+  pane: DictationDestination | "settings" | "general" | "meetings" | "annotate" | "home" | "live-meeting"
+}
+
 type Requests = {
+  windowNavigation: undefined
+  annotation: { action: "status" | "start" | "stop" | "cancel" | "reveal"; languages?: string[]; source?: DesktopAnnotationSource }
+  copyAnnotation: { id: string }
+  pasteAnnotation: { id: string }
+  annotationRoutingPolicy: undefined
+  annotationDestinations: { query: string; id?: string }
+  rememberAnnotationDestination: { id: string; service: string; target: string; scope: AnnotationRouteScope["kind"]; automatic: boolean }
+  forgetAnnotationDestination: { id: string; ruleId: string }
+  sendAnnotation: { id: string; target: string; service: string }
+  annotationDeliveries: { id: string }
+  annotationRoute: { id: string; action: "status" | "cancel" }
+  undoAnnotationDelivery: { deliveryId: string; restoreFiles?: boolean }
+  correctAnnotationDelivery: { deliveryId: string }
+  meetings: DesktopMeetingAction
+  meetingAudioAccess: { action: "status" | "allow" | "repair" }
+  dockIcon: { action: "status" } | { action: "set"; enabled: boolean }
+  loginItem: DesktopLoginAction
+  interfaceLanguage: { action: "status" } | { action: "set"; selected: string }
+  update: DesktopUpdateAction
+  systemDictation: DictationAction
   permission: { source: CaptureSource; prompt: boolean }
   openPrivacy: { source: CaptureSource }
   revealApp: undefined
@@ -39,13 +202,35 @@ type Requests = {
   openAudio: CaptureOptions
   recover: CaptureOptions & { id: string }
   discard: { id: string }
-  export: { id: string; kind: "audio" | "json" }
+  export: { id: string; kind: "audio" | "json" | "md" | "notes" | "srt" | "vtt" | "annotation-manifest" | "annotation-contact-sheet" }
+  meetingExports: { action: "status" | "choose" | "disable" } | { action: "reveal"; id?: string }
+    | { action: "separateNotes" | "descriptiveNames"; enabled: boolean }
 }
 type Responses = {
+  windowNavigation: { navigation?: WindowNavigation }
+  annotation: DesktopAnnotation
+  copyAnnotation: { includedImage: boolean }
+  pasteAnnotation: { destination: string; includedSheet: boolean }
+  annotationRoutingPolicy: { managed: boolean }
+  annotationDestinations: AnnotationDestinations
+  rememberAnnotationDestination: AnnotationDestinationRule
+  forgetAnnotationDestination: { forgotten: boolean }
+  sendAnnotation: AnnotationDelivery & { delivery: "queued" }
+  annotationDeliveries: { deliveries: AnnotationDelivery[] }
+  annotationRoute: AnnotationRouteStatus
+  undoAnnotationDelivery: AnnotationDelivery
+  correctAnnotationDelivery: AnnotationDelivery
+  meetings: DesktopMeeting
+  meetingAudioAccess: DesktopMeetingAudioAccess
+  dockIcon: DesktopDockIcon
+  loginItem: DesktopLoginItem
+  interfaceLanguage: DesktopInterfaceLanguage
+  update: DesktopUpdate
+  systemDictation: DictationStatus | DictationHistory | DictationOutputPreview | DictationOutputProfiles | DictationScriptReview
   permission: { status: PermissionStatus }
   openPrivacy: unknown
   revealApp: unknown
-  devices: { microphone: string; capture?: ActiveCapture | null; drafts?: RecordingDraft[] }
+  devices: DesktopDevices
   record: unknown
   stop: unknown
   dictation: { text: string } | null
@@ -54,20 +239,28 @@ type Responses = {
   recover: { id: string }
   discard: unknown
   export: unknown
+  meetingExports: { folder: string | null; separateNotes?: boolean; descriptiveNames?: boolean }
+}
+export type DesktopDevices = {
+  microphone: string
+  dictationMicrophones?: [system: string, preferNonBluetooth: string]
+  inputs?: { id: string; name: string }[]
+  capture?: ActiveCapture | null
+  drafts?: RecordingDraft[]
 }
 export type DesktopBridge = {
   request<A extends keyof Requests>(action: A, ...args: Requests[A] extends undefined ? [] : [Requests[A]]): Promise<Responses[A]>
 }
 
-export type DesktopCaptureEvent = { dictation?: string } & (
-  | { event: "started"; mode: RecordingMode; microphone: string }
+export type DesktopCaptureEvent = { dictation?: string; meeting?: string } & (
+  | { event: "started"; mode: RecordingMode; microphone: string; live?: boolean }
   | { event: "levels"; seconds: number; mic: number; system: number; microphone?: string }
   | { event: "sourceChanged"; microphone: string; message: string }
   | { event: "preview"; text: string; segments?: SpeakerSegment[] }
   | { event: "finished"; reason?: string }
-  | { event: "accepted" | "dictationReady"; id: string }
+  | { event: "accepted" | "dictationReady"; id: string; interruption?: string }
   | { event: "warning"; message: string }
-  | { event: "error"; message: string; permission?: CaptureSource }
+  | { event: "error"; message: string; permission?: CaptureSource; draft?: string }
 )
 
 declare global {
@@ -75,7 +268,16 @@ declare global {
     jardDesktop?: DesktopBridge
     zero?: { invoke<R>(command: string, payload: unknown): Promise<R> }
   }
-  interface WindowEventMap { "jard-capture": CustomEvent<DesktopCaptureEvent> }
+  interface WindowEventMap {
+    "jard-capture": CustomEvent<DesktopCaptureEvent>
+    "native-sdk:jard-window-navigation": CustomEvent<WindowNavigation>
+    "native-sdk:jard-update": CustomEvent<DesktopUpdate>
+    "native-sdk:jard-dock-icon": CustomEvent<DesktopDockIcon>
+    "native-sdk:jard-interface-language": CustomEvent<DesktopInterfaceLanguage>
+    "native-sdk:jard-annotation": CustomEvent<DesktopAnnotation>
+    "native-sdk:jard-annotation-routing": CustomEvent<AnnotationRouteStatus>
+    "native-sdk:jard-meetings": CustomEvent<DesktopMeeting>
+  }
 }
 
 // Native SDK installs its bridge at document start. A regular browser has no host transport.

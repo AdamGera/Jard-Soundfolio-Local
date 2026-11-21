@@ -8,7 +8,7 @@ if [[ -t 0 ]]; then
 fi
 
 # A current engine may have been launched by the installed Mac app in a different folder.
-if [[ -x .venv/bin/python ]] && .venv/bin/python engine_lifecycle.py --quit; then
+if [[ -x .venv/bin/python ]] && .venv/bin/python engine/engine_lifecycle.py --quit; then
   exit 0
 fi
 
@@ -22,7 +22,8 @@ if [[ -f "$lock" ]]; then
     [[ "$cwd" -ef "$PWD" ]] || continue
     command_line=$(ps -ww -p "$pid" -o command=) || continue
     case "$command_line" in
-      *" server.py"|*" server.py "*|*" $cwd/server.py"|*" $cwd/server.py "*) ;;
+      *" server.py"|*" server.py "*|*" $cwd/server.py"|*" $cwd/server.py "*|\
+      *" engine/server.py"|*" engine/server.py "*|*" $cwd/engine/server.py"|*" $cwd/engine/server.py "*) ;;
       *) continue ;;
     esac
 

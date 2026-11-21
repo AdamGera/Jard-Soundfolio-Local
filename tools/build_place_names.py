@@ -27,7 +27,7 @@ def main():
     data = {"source": "GeoNames via geonamescache 3.0.2, selected capital names and alternate spellings",
             "attribution": "GeoNames (https://www.geonames.org/), CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
             "names": aliases}
-    output = Path(__file__).resolve().parents[1] / "place_names.json"
+    output = Path(__file__).resolve().parents[1] / "engine" / "place_names.json"
     output.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1) + "\n", encoding="utf-8")
 
 

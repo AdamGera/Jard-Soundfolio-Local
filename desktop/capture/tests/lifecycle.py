@@ -6,25 +6,32 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from uuid import uuid4
 
 
 def exercise(executable, folder, mode):
     path = folder / (mode + ".wav")
     path.touch()
-    child = subprocess.Popen([executable, "record", "--mode", "both", "--output", str(path)],
+    tracks = {source: Path(f"{path}.{source}.wav") for source in ("mic", "system")} if mode == "stop" else {}
+    for track in tracks.values():
+        track.touch()
+    options = ["--separate-tracks"] if tracks else []
+    child = subprocess.Popen([executable, "record", "--mode", "both", "--output", str(path), *options],
                              env={**os.environ, "JARD_TEST_INPUT_LOSS": str(int(mode == "loss"))},
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         events = []
+        request = str(uuid4()) if tracks else None
         for line in child.stdout:
             item = json.loads(line)
             events.append(item)
             if item["event"] == "levels" and item["seconds"] >= 2.25:
                 if mode == "stop":
-                    child.stdin.write("stop\n")
+                    child.stdin.write(f"copy {request}\nstop\n")
                     child.stdin.flush()
                 elif mode == "eof":
                     child.stdin.close()
@@ -51,11 +58,253 @@ def exercise(executable, folder, mode):
             assert path.stat().st_size == frames * 2 + 44
             if mode == "loss":
                 assert "timing reference" in events[-1]["reason"], events[-1]
+        for source, track in tracks.items():
+            with wave.open(str(track), "rb") as w:
+                assert w.getnframes() == frames
+                assert w.getframerate() == 48000 and w.getnchannels() == 1
+                w.setpos(16000)
+                expected = 8192 if source == "mic" else 16384
+                assert abs(struct.unpack("<h", w.readframes(1))[0] - expected) < 3
+            assert track.stat().st_size == path.stat().st_size
+        if request:
+            cutoff = next(event for event in events if event["event"] == "meetingCopy")
+            assert cutoff["request"] == request and 2 * 48000 <= cutoff["frame"] <= frames, cutoff
         return f"{mode}: {frames} valid mixed samples"
     finally:
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def exercise_overlapping_takes(executable, folder):
+    meeting, dictation = folder / "meeting.wav", folder / "dictation.wav"
+    tracks = [Path(f"{meeting}.{source}.wav") for source in ("mic", "system")]
+    for path in (meeting, dictation, *tracks):
+        path.touch()
+
+    def launch(mode, path, flag):
+        return subprocess.Popen([executable, "record", "--mode", mode, "--output", str(path), flag],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def levels(child, seconds):
+        for line in child.stdout:
+            event = json.loads(line)
+            if event["event"] == "levels" and event["seconds"] >= seconds:
+                return event
+        raise AssertionError("Recorder exited before producing its expected levels.")
+
+    with launch("both", meeting, "--separate-tracks") as call:
+        try:
+            before = levels(call, 1)["seconds"]
+            with launch("mic", dictation, "--meter") as take:
+                try:
+                    levels(take, 1.25)
+                    take.stdin.write("finish\n")
+                    take.stdin.flush()
+                    assert take.wait(timeout=3) == 0
+                    assert json.loads(take.stdout.readlines()[-1])["event"] == "finished"
+                finally:
+                    if take.poll() is None:
+                        take.kill()
+            levels(call, before + 1.5)
+            call.stdin.write("stop\n")
+            call.stdin.flush()
+            assert call.wait(timeout=3) == 0
+        finally:
+            if call.poll() is None:
+                call.kill()
+
+    with wave.open(str(meeting), "rb") as mixed, wave.open(str(dictation), "rb") as mic_only:
+        frames = mixed.getnframes()
+        assert frames >= mic_only.getnframes() + 48000
+        mic_only.setpos(24000)
+        assert struct.unpack("<h", mic_only.readframes(1))[0] == 8192
+    for path, expected in zip(tracks, (8192, 16384)):
+        with wave.open(str(path), "rb") as track:
+            assert track.getnframes() == frames
+            track.setpos(24000)
+            samples = track.readframes(frames - 48000)
+            assert samples == struct.pack("<h", expected) * (len(samples) // 2)
+    print("Overlapping recorder processes preserved both meeting tracks and the shorter microphone-only take.")
+
+def exercise_source_handoff(executable, root, *, system_restart):
+    fixture = "system-restart" if system_restart else "mic-handoff"
+    recording = root / (fixture + ".wav")
+    microphone = Path(str(recording) + ".mic.wav")
+    system = Path(str(recording) + ".system.wav")
+    for path in (recording, microphone, system):
+        path.touch()
+    with subprocess.Popen(
+        [executable, "record", "--mode", "both", "--output", str(recording), "--separate-tracks"],
+        env={**os.environ, ("JARD_TEST_SYSTEM_RESTART" if system_restart else "JARD_TEST_MIC_HANDOFF"): "1"},
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    ) as child:
+        try:
+            for line in child.stdout:
+                event = json.loads(line)
+                if event.get("seconds", 0) >= 1:
+                    child.stdin.write("stop\n")
+                    child.stdin.flush()
+                    break
+            assert child.wait(timeout=3) == 0
+        finally:
+            if child.poll() is None:
+                child.kill()
+    with wave.open(str(microphone), "rb") as mic, wave.open(str(system), "rb") as mac:
+        assert mic.getnframes() == mac.getnframes()
+        signal = struct.unpack(f"<{mic.getnframes()}h", mic.readframes(mic.getnframes()))
+        first = signal.index(8192)
+        handoff = first + 20 * 960
+        mac.setpos(first)
+        if system_restart:
+            assert signal[first:first + 32000] == (8192,) * 32000
+            assert mac.readframes(19200) == struct.pack("<h", 16384) * 19200
+            assert mac.readframes(4800) == b"\0\0" * 4800
+            assert mac.readframes(9000) == struct.pack("<h", 12288) * 9000
+            print("The Mac audio restart retained the gap, recovered on the same clock, and left the microphone continuous.")
+        else:
+            assert signal[first:handoff] == (8192,) * (20 * 960)
+            assert signal[handoff:handoff + 12000] == (4096,) * 12000
+            assert mac.readframes(32000) == struct.pack("<h", 16384) * 32000
+            print("Meeting microphone handoff dropped old tap callbacks and overlap while Mac audio stayed continuous.")
+
+
+def exercise_timed_tails(executable, root):
+    def wait_for(child, kind, seconds=0):
+        for line in child.stdout:
+            event = json.loads(line)
+            if event["event"] == kind and event.get("seconds", 0) >= seconds:
+                return event
+        raise AssertionError(f"Recorder exited before {kind}.")
+
+    for warm, speech_end, expected in ((False, 24, 0.2), (True, 36, 0.47), (False, 80, 0.6), (True, 80, 0.6)):
+        path = root / f"tail-{warm}-{speech_end}.wav"
+        path.touch()
+        args = ["warm"] if warm else ["record", "--mode", "mic", "--output", str(path), "--meter"]
+        with subprocess.Popen(
+            [executable, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "JARD_TEST_SPEECH_FRAMES": str(speech_end)},
+        ) as child:
+            try:
+                if warm:
+                    wait_for(child, "warmReady")
+                    child.stdin.write(json.dumps({"start": str(path), "preRoll": False}) + "\n")
+                    child.stdin.flush()
+                wait_for(child, "levels", seconds=0.4)
+                # The host shortcut clock is mach_absolute_time, also used by Python's perf_counter here.
+                release = time.perf_counter()
+                time.sleep(0.09)  # Relay delay must not move the release point in the WAV.
+                child.stdin.write(f"finish {release:.9f}\n")
+                child.stdin.flush()
+                finish = wait_for(child, "finished")
+                with wave.open(str(path), "rb") as stream:
+                    before_release = finish["releaseFrame"] / stream.getframerate()
+                    tail = stream.getnframes() / stream.getframerate() - before_release
+                    assert 0.39 <= before_release <= 0.53, finish
+                    assert abs(tail - expected) < (0.065 if expected == 0.47 else 0.0001), finish
+                if warm:
+                    wait_for(child, "takeEnded")
+                    child.stdin.close()
+                assert child.wait(timeout=3) == 0
+            finally:
+                if child.poll() is None:
+                    child.kill()
+    print("Timed cold and warm WAVs keep the short ending, grow into a pause, and enforce the full tail cap.")
+
+    path = root / "tail-before-start.wav"
+    path.touch()
+    release = time.perf_counter()
+    with subprocess.Popen(
+        [executable, "record", "--mode", "mic", "--output", str(path), "--meter"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "JARD_TEST_START_DELAY": "1"},
+    ) as child:
+        try:
+            child.stdin.write(f"finish {release:.9f}\n")
+            child.stdin.flush()
+            assert child.wait(timeout=3) == 0
+            finish = wait_for(child, "finished")
+            assert finish["releaseFrame"] == 0, finish
+            with wave.open(str(path), "rb") as stream:
+                assert stream.getnframes() == 0, finish
+        finally:
+            if child.poll() is None:
+                child.kill()
+
+def exercise_microphone_interruption(executable, root):
+    cases = ((False, "loss"), (False, "gap"), (True, "stall"), (True, "preRoll"), (True, "zero"))
+    for warm, mode in cases:
+        path = root / f"interruption-{mode}.wav"
+        path.touch()
+        args = ["warm"] if warm else ["record", "--mode", "mic", "--output", str(path), "--meter"]
+        with subprocess.Popen(
+            [executable, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "JARD_TEST_INTERRUPTION": mode, **({"JARD_TEST_SPEECH_FRAMES": "8"} if mode == "zero" else {})},
+        ) as child:
+            try:
+                if warm:
+                    assert json.loads(child.stdout.readline())["event"] == "warmReady"
+                    child.stdin.write(json.dumps({"start": str(path), "preRoll": mode == "preRoll"}) + "\n")
+                    child.stdin.flush()
+                if not warm:
+                    assert child.wait(timeout=7) == 0
+                if mode == "zero":
+                    for line in child.stdout:
+                        if json.loads(line).get("seconds", 0) >= .3:
+                            break
+                    child.stdin.write("stop\n")
+                    child.stdin.flush()
+                for line in child.stdout:
+                    event = json.loads(line)
+                    if event["event"] == "finished":
+                        break
+                else:
+                    raise AssertionError("Missing interrupted WAV result.")
+                with wave.open(str(path), "rb") as stream:
+                    assert stream.getnframes() == round(event["seconds"] * 48000), event
+                    if mode == "zero":
+                        assert "interruption" not in event and event["reason"] == "Stopped", event
+                        assert stream.getnframes() > 12_000 and not any(stream.readframes(stream.getnframes()))
+                    else:
+                        assert event["interruption"] == ("discontinuity" if mode == "gap" else "microphone"), event
+                        assert event["hasLiveAudio"] is (mode != "preRoll") and event["capturedThrough"] > 0, event
+                        expected = 960 if mode == "preRoll" else 19200
+                        assert abs(stream.getnframes() - expected) < 480, event
+                if warm:
+                    if mode != "zero":
+                        status = json.loads(child.stdout.readline())
+                        assert status["event"] == "warmAvailability" and status["phase"] == "unavailable", status
+                    reset = json.loads(child.stdout.readline())
+                    assert reset == {"event": "fixtureWarmReset", "reason": "renegotiate" if mode == "zero" else "reopen"}, reset
+                    assert json.loads(child.stdout.readline())["event"] == "takeEnded"
+                    child.stdin.close()
+                    assert child.wait(timeout=4) == 0
+            finally:
+                if child.poll() is None:
+                    child.kill()
+    print("Interruption WAVs ended at the last real packet, and the warm recorder reset after loss or digital silence.")
+
+def exercise_abandoned_cold_open(executable, root):
+    for action in ("stop", "finish"):
+        path = root / f"abandoned-cold-{action}.wav"
+        path.touch()
+        arguments = ["record", "--mode", "mic", "--output", str(path), "--meter", "--cold-recovery",
+                     "--input", "Fixture selected", "--avoid-bluetooth"]
+        with subprocess.Popen(
+            [executable, *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "JARD_TEST_START_DELAY": "1"},
+        ) as child:
+            try:
+                command = f"finish {time.perf_counter():.9f}" if action == "finish" else action
+                child.stdin.write(command + "\n")
+                child.stdin.flush()
+                assert child.wait(timeout=4) == 0
+                assert [json.loads(line)["event"] for line in child.stdout] == ["openingAbandoned"]
+                assert path.stat().st_size == 0
+            finally:
+                if child.poll() is None:
+                    child.kill()
+    print("Stop and timestamped release abandoned a cold open before any WAV or ready event.")
 
 
 if __name__ == "__main__":
@@ -69,6 +318,19 @@ if __name__ == "__main__":
             assert result.returncode == 1 and event["event"] == "error" and event["permission"] == source, event
             assert path.stat().st_size == 0
         print("Structured microphone and system audio denials left no recorded audio.")
+        path = Path(tmp) / "open-failure.wav"
+        path.touch()
+        result = subprocess.run([sys.argv[1], "record", "--mode", "mic", "--output", str(path), "--meter"],
+                                env={**os.environ, "JARD_TEST_OPEN_FAILURE": "1"}, input="", capture_output=True, text=True, timeout=5)
+        failure = json.loads(result.stdout)
+        assert result.returncode == 1 and failure["interruption"] == "microphone" and failure["failedAt"] > 0, failure
+        assert path.stat().st_size == 0
         results = [pool.submit(exercise, sys.argv[1], Path(tmp), mode) for mode in ["stop", "eof", "term", "kill", "loss"]]
         for task in results:
             print(task.result(timeout=20))
+        exercise_overlapping_takes(sys.argv[1], Path(tmp))
+        exercise_source_handoff(sys.argv[1], Path(tmp), system_restart=False)
+        exercise_source_handoff(sys.argv[1], Path(tmp), system_restart=True)
+        exercise_timed_tails(sys.argv[1], Path(tmp))
+        exercise_microphone_interruption(sys.argv[1], Path(tmp))
+        exercise_abandoned_cold_open(sys.argv[1], Path(tmp))

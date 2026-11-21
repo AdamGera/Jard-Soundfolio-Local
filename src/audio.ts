@@ -4,8 +4,8 @@ export const MAX_SECONDS = 3 * 60 * 60
 const SAMPLE_RATE = 16_000
 const PREVIEW_BUFFER_SECONDS = 12
 
-export type SpeakerSegment = { speaker: number; start: number; end: number | null; text: string }
-export type WordTiming = { speaker?: number; separator?: string; blockStart?: number; start: number | null; end: number | null; text: string }
+export type SpeakerSegment = { speaker: number | null; start: number; end: number | null; text: string }
+export type WordTiming = { speaker?: number | null; separator?: string; blockStart?: number; start: number | null; end: number | null; text: string }
 export type Transcript = {
   text: string
   durationSeconds: number | null
@@ -13,6 +13,9 @@ export type Transcript = {
   segments: SpeakerSegment[]
   words: WordTiming[]
   speakerActivity: SpeakerActivity[] | null
+  speakerNames?: Record<number, string>
+  echoSuppressedUtterances?: number
+  transcriptSource?: "final" | "rolling" | "draft"
   interruption?: string
 }
 export const EMPTY_TRANSCRIPT: Transcript = {
@@ -225,12 +228,28 @@ export async function transcribeDictation(audio: Blob, languages: readonly strin
   return response.json()
 }
 
+export type MeetingBrief = { status: "queued" | "ready" | "error"; title: string | null; summary: string | null; error: string | null }
+export type MeetingExport = { status: "pending" | "ready" | "error"; filename: string | null; error: string | null; refreshing?: boolean }
+
 export type SavedSession = {
   personalNotes?: import("./personal-notes").PersonalNotes
   overview?: import("./overview").Overview | null
   id: string; name: string; created: string; status: "complete" | "interrupted" | "processing"
   languageHints: string[]; recording: boolean; diarization: boolean; live: boolean
-  audioUrl: string; audioPath: string; audioName: string; transcript: Transcript
+  audioUrl: string | null; audioPath: string | null; audioName: string; transcript: Transcript
+  meeting?: boolean; meetingProvider?: string | null; audioRemovedAt?: string | null
+  meetingsManaged?: boolean
+  finalizationPending?: boolean
+  meetingRetentionDays?: number | null
+  meetingCalendar?: { title: string; attendees: string[] }
+  meetingTitle?: string
+  meetingMicrophoneWarning?: "digitalSilence"
+  provisionalTitle?: string
+  meetingBrief?: MeetingBrief | null
+  meetingExport?: MeetingExport | null
+  recordingTracks?: Partial<Record<"mic" | "system", string>>
+  annotation?: { version: 1; source: "display" | "window" | "area" | "phone"; strokeCount: number; frames: number[];
+    manifestUrl: string; contactSheetUrl: string | null }
   model: string; modelRevision: string; speakerModel: string | null; speakerModelRevision: string | null
 }
 

@@ -1,3 +1,4 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useState } from "react"
 import { AlertDialog } from "radix-ui"
 import { Power } from "lucide-react"
@@ -5,6 +6,7 @@ import { desktopBridge } from "@/desktop"
 import { Button } from "./ui/button"
 
 export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: () => void }) {
+  const { t } = useInterfaceLanguage()
   const native = desktopBridge()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -47,11 +49,11 @@ export function QuitButton({ recording, onQuit }: { recording: boolean; onQuit: 
         <AlertDialog.Title>Quit Jaro Everywhere?</AlertDialog.Title>
         <AlertDialog.Description>
           {recording && (native ? "The Mac app will save your recording first. " : "Quitting will discard this browser recording. ")}
-          This stops the shared engine and active jobs for all clients. To leave other clients working, close this {native ? "window" : "tab"}.
+          This stops the shared engine and active jobs for all clients. To leave other clients working, close this {native ? t("window") : "tab"}.
         </AlertDialog.Description>
         {error && <p role="alert">{error}</p>}
         <div className="note-language-actions">
-          <AlertDialog.Cancel asChild><Button size="sm" variant="outline" disabled={busy}>Cancel</Button></AlertDialog.Cancel>
+          <AlertDialog.Cancel asChild><Button size="sm" variant="outline" disabled={busy}>{t("Cancel")}</Button></AlertDialog.Cancel>
           <Button size="sm" disabled={busy} onClick={() => void quit()}>{busy ? "Quitting…" : "Quit Everywhere"}</Button>
         </div>
       </AlertDialog.Content>

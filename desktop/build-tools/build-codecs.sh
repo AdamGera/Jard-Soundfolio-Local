@@ -14,7 +14,7 @@ cd "$cache"
 cd ffmpeg-7.1.1
 ./configure --cc=clang --disable-autodetect --disable-doc --disable-debug --disable-network \
   --disable-everything --disable-ffplay --enable-ffmpeg --enable-ffprobe \
-  --enable-protocol=file,pipe --enable-demuxer=aac,aiff,flac,matroska,mov,mp3,ogg,wav,pcm_s16le,pcm_f32le \
+  --enable-protocol=file,pipe --enable-demuxer=aac,aiff,caf,flac,matroska,mov,mp3,ogg,wav,pcm_s16le,pcm_f32le \
   --enable-decoder='aac*,alac,flac,mp3*,opus,vorbis,pcm_*,adpcm_*' \
   --enable-parser=aac,aac_latm,flac,mpegaudio,opus,vorbis \
   --enable-filter=aresample,aformat,anull,atrim,volume --enable-muxer=ipod,wav,pcm_f32le,pcm_s16le \

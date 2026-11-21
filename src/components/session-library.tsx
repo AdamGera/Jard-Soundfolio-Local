@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useInterfaceLanguage } from "@/interface-language"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { AlertDialog, Dialog, Tooltip } from "radix-ui"
-import { ArrowLeft, ChevronDown, FileAudio2, House, PanelLeft, Search, Settings, Trash2 } from "lucide-react"
+import { ArrowLeft, ChevronDown, FileAudio2, House, Mic, PanelLeft, Search, Settings, Trash2, UsersRound } from "lucide-react"
+import type { DesktopBridge, DictationDestination, WindowNavigation } from "@/desktop"
 import { readSession, type SavedSession } from "@/audio"
 import { useSessionList, type SessionSummary } from "@/session-list"
 import { SessionSearch } from "./session-search"
+import { SettingsSearch } from "./settings-search"
 import { Button } from "./ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs"
 import "@/sidebar.css"
 
 const compactWindow = "(max-width: 800px)"
 const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+const settingsPages = [
+  { id: "general", label: "General" },
+  { id: "dictation", label: "Dictation" },
+  { id: "meetings", label: "Meetings" },
+  { id: "annotate", label: "Annotate" },
+] as const
 
 type Props = {
   busy: boolean
@@ -16,11 +26,16 @@ type Props = {
   onHome: () => void
   onSelect: (session: SavedSession) => void
   onDelete: (id: string) => void
-  settings?: ReactNode
+  settings?: Record<(typeof settingsPages)[number]["id"], ReactNode>
+  native?: DesktopBridge
+  dictation?: (destination: DictationDestination, navigationId?: string) => ReactNode
+  update?: ReactNode
+  openUpdateSettings?: string
   children: ReactNode
 }
 
-export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, settings, children }: Props) {
+export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, settings, native, dictation, update, openUpdateSettings, children }: Props) {
+  const { t } = useInterfaceLanguage()
   const [compact, setCompact] = useState(() => matchMedia(compactWindow).matches)
   const [pinned, setPinned] = useState(() => {
     try { return localStorage.getItem("jard.sidebar") !== "collapsed" } catch { return true }
@@ -29,10 +44,16 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
   const expanded = compact ? overlay : pinned
   const [showSessions, setShowSessions] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const settingsTitle = useRef<HTMLHeadingElement>(null)
+  const [pane, setPane] = useState<"settings" | "dictation">()
+  const [settingsPage, setSettingsPage] = useState("general")
+  const [windowNavigation, setWindowNavigation] = useState<WindowNavigation>()
+  const [dictationRoute, setDictationRoute] = useState<{ pane: DictationDestination; id: string }>()
+  const paneTitle = useRef<HTMLHeadingElement>(null)
+  const settingsScope = useRef<HTMLDivElement>(null)
   const settingsButton = useRef<HTMLButtonElement>(null)
+  const dictationButton = useRef<HTMLButtonElement>(null)
   const [selectionError, setSelectionError] = useState("")
+  const [deletionNotice, setDeletionNotice] = useState("")
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
   const [deletePending, setDeletePending] = useState(false)
   const [deleteError, setDeleteError] = useState("")
@@ -42,6 +63,8 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
   const toggleButton = useRef<HTMLButtonElement>(null)
   const overlayToggleButton = useRef<HTMLButtonElement>(null)
   const deleteButton = useRef<HTMLButtonElement>(null)
+  const handledUpdateSettings = useRef<string>(undefined)
+  const handledNavigation = useRef<string>(undefined)
 
   useEffect(() => {
     const media = matchMedia(compactWindow)
@@ -67,7 +90,7 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
   }
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
-      if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || event.repeat || event.isComposing) return
+      if (pane || event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || event.repeat || event.isComposing) return
       if (event.key.toLowerCase() === "k" && !event.shiftKey) {
         if (busy || deleting || document.querySelector('[role="alertdialog"]')) return
         event.preventDefault()
@@ -78,28 +101,86 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
     }
     window.addEventListener("keydown", keydown)
     return () => window.removeEventListener("keydown", keydown)
-  }, [busy, deleting])
+  }, [busy, deleting, pane])
 
-  function openSettings() {
+  const openPane = useCallback((next?: "settings" | "dictation") => {
     request.current?.abort()
     setSelectionError("")
     setOverlay(false)
-    setSettingsOpen(true)
-  }
+    setPane(next)
+  }, [])
   useEffect(() => {
-    if (!settingsOpen) return
-    settingsTitle.current?.focus()
-    const close = () => setSettingsOpen(false)
+    if (!openUpdateSettings || busy || deleting || handledUpdateSettings.current === openUpdateSettings) return
+    const frame = requestAnimationFrame(() => {
+      handledUpdateSettings.current = openUpdateSettings
+      try {
+        if (sessionStorage.getItem("jard.updateSettingsRequest") === openUpdateSettings) return
+        sessionStorage.setItem("jard.updateSettingsRequest", openUpdateSettings)
+      } catch { /* The component still handles the current request once. */ }
+      setSearchOpen(false)
+      setSettingsPage("general")
+      openPane("settings")
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [openUpdateSettings, busy, deleting, openPane])
+  useEffect(() => {
+    if (!native) return
+    let active = true
+    let receivedEvent = false
+    function receive(event: WindowEventMap["native-sdk:jard-window-navigation"]) {
+      receivedEvent = true
+      setWindowNavigation(event.detail)
+    }
+    window.addEventListener("native-sdk:jard-window-navigation", receive)
+    void native.request("windowNavigation").then(snapshot => {
+      if (active && !receivedEvent && snapshot?.navigation) setWindowNavigation(snapshot.navigation)
+    }).catch(() => { /* Older desktop hosts have no window navigation. */ })
+    return () => {
+      active = false
+      window.removeEventListener("native-sdk:jard-window-navigation", receive)
+    }
+  }, [native])
+  useEffect(() => {
+    if (!windowNavigation || (busy && windowNavigation.pane !== "live-meeting") || deleting ||
+        handledNavigation.current === windowNavigation.id) return
+    const frame = requestAnimationFrame(() => {
+      handledNavigation.current = windowNavigation.id
+      try {
+        if (sessionStorage.getItem("jard.windowNavigation") === windowNavigation.id) return
+        sessionStorage.setItem("jard.windowNavigation", windowNavigation.id)
+      } catch { /* The current workspace still handles the request once. */ }
+      setSearchOpen(false)
+      const { id, pane: destination } = windowNavigation
+      if (destination === "home" || destination === "live-meeting") {
+        openPane()
+        if (destination === "live-meeting") requestAnimationFrame(() => {
+          document.querySelector<HTMLElement>("[data-live-transcript]")?.focus({ preventScroll: true })
+        })
+      } else if (destination === "dictation" || destination === "history" || destination === "output") {
+        setDictationRoute({ pane: destination, id })
+        openPane("dictation")
+      } else {
+        setSettingsPage(destination === "settings" ? "general" : destination)
+        openPane("settings")
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [windowNavigation, busy, deleting, openPane])
+  useEffect(() => {
+    if (!pane) return
+    paneTitle.current?.focus({ preventScroll: true })
+    window.scrollTo(0, 0)
+    const close = () => setPane(undefined)
     window.addEventListener("popstate", close)
     return () => window.removeEventListener("popstate", close)
-  }, [settingsOpen])
+  }, [pane])
 
   function home() {
     if (busy) return
     request.current?.abort()
     setOverlay(false)
     setSelectionError("")
-    setSettingsOpen(false)
+    setPane(undefined)
     onHome()
   }
   async function select(id: string) {
@@ -112,7 +193,7 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
       const session = await readSession(id, abort.signal)
       if (abort.signal.aborted) return
       setOverlay(false)
-      setSettingsOpen(false)
+      setPane(undefined)
       onSelect(session)
     } catch (error) {
       if (!abort.signal.aborted) setSelectionError(error instanceof Error ? error.message : "Could not open session.")
@@ -124,6 +205,8 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
     try {
       const response = await fetch("/api/sessions/" + deleting.id, { method: "DELETE" })
       if (!response.ok && response.status !== 404) throw new Error((await response.json()).detail)
+      setSelectionError("")
+      setDeletionNotice(response.status === 202 ? t("Meeting archived. Jaro will retry moving it to the Trash.") : "")
       onDelete(deleting.id)
       deleteButton.current = null
       setDeleting(null)
@@ -150,36 +233,43 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
           <button ref={inOverlay ? undefined : searchButton} type="button" className="sidebar-search-trigger"
-            aria-label="Search sessions" aria-keyshortcuts="Meta+K Control+K" disabled={busy} onClick={search}>
+            aria-label={t("Search sessions")} aria-keyshortcuts="Meta+K Control+K" disabled={busy} onClick={search}>
             <Search aria-hidden="true" />
           </button>
         </Tooltip.Trigger>
         <Tooltip.Portal><Tooltip.Content side="bottom" sideOffset={6} className="sidebar-tip">
-          Search <kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
+          {t("Search")} <kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
         </Tooltip.Content></Tooltip.Portal>
       </Tooltip.Root>
     </div>
   }
   const navigation = <nav id="workspace-sidebar" aria-label="Workspace" className="sidebar-navigation">
-    <button className="sidebar-home" disabled={busy} onClick={home} aria-current={!settingsOpen && !currentId ? "page" : undefined}>
-      <House aria-hidden="true" />Home
+    <button className="sidebar-home" disabled={busy} onClick={home} aria-current={!pane && !currentId ? "page" : undefined}>
+      <House aria-hidden="true" />{t("Home")}
     </button>
+    {dictation && <button type="button" ref={dictationButton} className="sidebar-home" disabled={busy}
+      aria-current={pane === "dictation" ? "page" : undefined} onClick={() => {
+        if (pane !== "dictation") setDictationRoute(undefined)
+        openPane("dictation")
+      }}>
+      <Mic aria-hidden="true" />{t("Dictation")}
+    </button>}
     <button className="sidebar-section" aria-expanded={showSessions} aria-controls="sidebar-sessions"
       onClick={() => setShowSessions(!showSessions)}>
-      Sessions<ChevronDown aria-hidden="true" />
+      {t("Sessions")}<ChevronDown aria-hidden="true" />
     </button>
     <div className="sidebar-list" id="sidebar-sessions" hidden={!showSessions}>
       {list.error ? <button className="sidebar-retry" onClick={list.refresh}>Couldn’t load sessions. Retry</button>
-        : !list.rows.length && <p>{list.loading ? "Loading sessions…" : "No saved sessions yet."}</p>}
-      {list.rows.map(row => <div key={row.id} className="sidebar-row" data-current={!settingsOpen && row.id === currentId}>
+        : !list.rows.length && <p>{list.loading ? t("Loading sessions…") : t("No saved sessions yet.")}</p>}
+      {list.rows.map(row => <div key={row.id} className="sidebar-row" data-current={!pane && row.id === currentId}>
         <button className="library-open" disabled={busy || row.status === "processing"}
-          aria-current={!settingsOpen && row.id === currentId ? "page" : undefined} title={row.name + " · " + date.format(new Date(row.created))}
+          aria-current={!pane && row.id === currentId ? "page" : undefined} title={row.name + " · " + date.format(new Date(row.created))}
           onClick={() => void select(row.id)}>
-          <FileAudio2 aria-hidden="true" /><span dir="auto">{row.name}</span>
-          {row.status !== "complete" && <small>{row.status === "processing" ? "Processing" : "Interrupted"}</small>}
+          {row.meeting ? <UsersRound aria-label="Meeting" /> : <FileAudio2 aria-hidden="true" />}<span dir="auto">{row.name}</span>
+          {row.status !== "complete" && <small>{row.status === "processing" ? t("Processing") : t("Interrupted")}</small>}
         </button>
         <button className="sidebar-delete" aria-label={"Delete " + row.name} title="Delete session"
-          disabled={busy || row.status === "processing"} onClick={event => {
+          disabled={busy || row.status === "processing" || (!!row.meeting && (row.status !== "complete" || row.finalizationPending))} onClick={event => {
             deleteButton.current = event.currentTarget
             setDeleteError("")
             setDeleting(row)
@@ -188,10 +278,13 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
         </button>
       </div>)}
     </div>
-    {settings && <button type="button" ref={settingsButton} className="sidebar-home sidebar-settings" disabled={busy}
-      aria-current={settingsOpen ? "page" : undefined} onClick={openSettings}>
-      <Settings aria-hidden="true" />Settings
-    </button>}
+    {(settings || update) && <div className="sidebar-footer">
+      {settings && <button type="button" ref={settingsButton} className="sidebar-home sidebar-settings" disabled={busy}
+        aria-current={pane === "settings" ? "page" : undefined} onClick={() => openPane("settings")}>
+        <Settings aria-hidden="true" />{t("Settings")}
+      </button>}
+      {update}
+    </div>}
   </nav>
 
   return <Tooltip.Provider delayDuration={360} skipDelayDuration={100}><div className="workspace-frame" data-sidebar={expanded && !compact}>
@@ -207,24 +300,43 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
             if (!deletePending) setDeleting(null)
           }}
           onInteractOutside={event => { if (deleting) event.preventDefault() }}
-          onCloseAutoFocus={event => { event.preventDefault(); if (settingsOpen) settingsTitle.current?.focus(); else if (!searchOpen) toggleButton.current?.focus() }}>
+          onCloseAutoFocus={event => { event.preventDefault(); if (pane && !searchOpen) paneTitle.current?.focus(); else if (!searchOpen) toggleButton.current?.focus() }}>
           <Dialog.Title className="sr-only">Workspace sidebar</Dialog.Title>
           {tools(true)}{navigation}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-    <div className="workspace-content" hidden={settingsOpen}>{children}</div>
-    {settingsOpen && <main className="workspace-settings">
+    <div className="workspace-content" hidden={!!pane}>{children}</div>
+    {pane && <main className="workspace-settings" data-pane={pane}>
       <button type="button" className="settings-back" onClick={() => {
-        setSettingsOpen(false)
-        const target = expanded && !compact ? settingsButton.current : toggleButton.current
+        setPane(undefined)
+        const button = pane === "dictation" ? dictationButton : settingsButton
+        const target = expanded && !compact ? button.current : toggleButton.current
         target?.focus()
-      }}><ArrowLeft aria-hidden="true" />Back</button>
-      <h1 tabIndex={-1} ref={settingsTitle}>Settings</h1>
-      {settings}
+      }}><ArrowLeft aria-hidden="true" />{t("Back")}</button>
+      <div className="settings-pane-title">
+        <h1 tabIndex={-1} ref={paneTitle}>{pane === "dictation" ? t("Dictation") : t("Settings")}</h1>
+        {pane === "settings" && <SettingsSearch scope={settingsScope} onReveal={row => {
+          const page = row.closest<HTMLElement>("[data-settings-page]")?.dataset.settingsPage
+          if (page) setSettingsPage(page)
+        }} />}
+      </div>
+      {pane === "dictation" ? dictation?.(dictationRoute?.pane ?? "dictation", dictationRoute?.id) : settings && <Tabs value={settingsPage} onValueChange={setSettingsPage} className="workspace-settings-tabs">
+        <TabsList variant="line" aria-label={t("Settings")}>
+          {settingsPages.map(({ id, label }) => <TabsTrigger key={id} value={id}>{t(label)}</TabsTrigger>)}
+        </TabsList>
+        <div ref={settingsScope}>
+          {settingsPages.map(({ id, label }) => <TabsContent key={id} value={id} forceMount hidden={settingsPage !== id}
+            data-settings-page={id} data-setting-group={id === "general" ? t(label) : undefined}>
+            {settings[id]}
+          </TabsContent>)}
+        </div>
+      </Tabs>}
     </main>}
     {selectionError && <div className="navigation-error" role="alert">{selectionError}
       <button onClick={() => setSelectionError("")}>Dismiss</button></div>}
+    {!selectionError && deletionNotice && <div className="navigation-error" role="status">{deletionNotice}
+      <button onClick={() => setDeletionNotice("")}>{t("Dismiss")}</button></div>}
     <SessionSearch open={searchOpen && !busy} onOpenChange={open => {
       setSearchOpen(open)
       if (!open) requestAnimationFrame(() => searchButton.current?.focus())
@@ -239,12 +351,16 @@ export function SessionLibrary({ busy, currentId, onHome, onSelect, onDelete, se
             const next = trigger?.isConnected ? trigger : overlayToggleButton.current ?? toggleButton.current
             next?.focus()
           }}>
-          <AlertDialog.Title>Delete “{deleting?.name}”?</AlertDialog.Title>
-          <AlertDialog.Description>This permanently removes the recording, transcript, overviews, speaker data, and chat.</AlertDialog.Description>
+          <AlertDialog.Title>{deleting?.meeting ? t("Move “{name}” to Trash?", { name: deleting.name }) : `Delete “${deleting?.name}”?`}</AlertDialog.Title>
+          <AlertDialog.Description>{deleting?.meeting
+            ? t("Jaro moves the meeting and any unchanged automatic Markdown exports to the Trash. Edited exports and manually saved copies stay where they are.")
+            : "This permanently removes the recording, transcript, overviews, speaker data, and chat."}</AlertDialog.Description>
           {deleteError && <p role="alert">{deleteError}</p>}
           <div className="note-language-actions">
-            <AlertDialog.Cancel asChild><Button variant="ghost" size="sm" disabled={deletePending}>Cancel</Button></AlertDialog.Cancel>
-            <Button variant="destructive" size="sm" disabled={deletePending} onClick={() => void remove()}>Delete permanently</Button>
+            <AlertDialog.Cancel asChild><Button variant="ghost" size="sm" disabled={deletePending}>{t("Cancel")}</Button></AlertDialog.Cancel>
+            <Button variant="destructive" size="sm" disabled={deletePending} onClick={() => void remove()}>
+              {deleting?.meeting ? t("Move to Trash") : "Delete permanently"}
+            </Button>
           </div>
         </AlertDialog.Content>
       </AlertDialog.Portal>

@@ -76,6 +76,15 @@
   }
   try {
     await until(() => one(".record-button:not(:disabled)") || one(".session-heading h1"), "First launch")
+    if (window.jardDesktop) {
+      const dictation = await window.jardDesktop.request("systemDictation", { action: "status" }).catch(() => null)
+      if (dictation?.onboarding && !["done", "later"].includes(dictation.onboarding)) {
+        const later = await until(() => [...document.querySelectorAll(".dictation-tour button")].find(
+          button => button.textContent.trim() === "Set up later"), "First-run deferral")
+        later.click()
+        await until(() => !document.querySelector(".dictation-tour"), "Tour dismissed")
+      }
+    }
     if (one(".session-heading h1")) {
       await click(() => one('button[aria-label="New session"]'), "Return from restored session")
     }

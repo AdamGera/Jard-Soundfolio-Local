@@ -1,3 +1,4 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
 import { Pause, Play, RotateCcw, RotateCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -14,6 +15,7 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
   const [mediaDuration, setMediaDuration] = useState(0)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState("")
+  const switching = useRef<{ source: string | Blob; time: number; playing: boolean } | null>(null)
   const duration = mediaDuration || transcriptDuration || 0
 
   const prepareMeter = useCallback((el: HTMLAudioElement) => {
@@ -68,8 +70,14 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
       preparing = true
       setReady(false)
       try {
-        const savedId = typeof source === "string" ? source.split("/")[3] : null
-        const response = await fetch(savedId ? `/api/playback?saved=${savedId}` : "/api/playback", {
+        const options = new URLSearchParams()
+        if (typeof source === "string") {
+          const address = new URL(source, location.href)
+          options.set("saved", address.pathname.split("/")[3])
+          const track = address.searchParams.get("track")
+          if (track) options.set("track", track)
+        }
+        const response = await fetch(`/api/playback${options.size ? `?${options}` : ""}`, {
           method: "POST", body: typeof source === "string" ? undefined : source, headers: { "Content-Type": "application/octet-stream" }, signal: abort.signal,
         })
         if (!response.ok) throw new Error()
@@ -86,6 +94,13 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
       if (!Number.isFinite(el.duration) || el.duration <= 0) { void prepare(); return }
       setMediaDuration(el.duration)
       setReady(true)
+      if (switching.current?.source === source) {
+        const saved = switching.current
+        switching.current = null
+        el.currentTime = Math.min(saved.time, el.duration)
+        sync()
+        if (saved.playing) void el.play().catch(() => {})
+      }
     }, options)
     el.addEventListener("error", prepare, options)
     el.addEventListener("play", () => setPlaying(true), options)
@@ -145,16 +160,28 @@ export function usePlayback(source: Blob | string | null, transcriptDuration: nu
     else el.pause()
   }
 
-  return { audio, wave, time, playing, advancing, duration, ready, error, seek, toggle }
+  function prepareSwitch(next: string | Blob) {
+    const el = audio.current
+    if (!el || next === source) return
+    switching.current = { source: next, time: switching.current?.time ?? el.currentTime,
+      playing: switching.current?.playing ?? !el.paused }
+    setReady(false)
+    setPlaying(false)
+    setAdvancing(false)
+    setError("")
+  }
+
+  return { audio, wave, time, playing, advancing, duration, ready, error, seek, toggle, prepareSwitch }
 }
 
 export function AudioPlayer({ player }: { player: ReturnType<typeof usePlayback> }) {
+  const { t } = useInterfaceLanguage()
   const { audio, time, duration, ready, playing, error, seek, toggle } = player
   return <div className="audio-player" role="group" aria-label="Audio player">
     <audio ref={audio} preload="metadata" />
     <div className="transport">
       <Button variant="ghost" size="icon-sm" disabled={!ready} aria-label="Back 10 seconds" title="Back 10 seconds" onClick={() => seek(time - 10)}><RotateCcw /><span className="skip-seconds" aria-hidden="true">10</span></Button>
-      <Button className="play-button" size="icon" disabled={!ready} aria-label={playing ? "Pause" : "Play"} onClick={toggle}>
+      <Button className="play-button" size="icon" disabled={!ready} aria-label={playing ? "Pause" : t("Play")} onClick={toggle}>
         {playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
       </Button>
       <Button variant="ghost" size="icon-sm" disabled={!ready} aria-label="Forward 10 seconds" title="Forward 10 seconds" onClick={() => seek(time + 10)}><RotateCw /><span className="skip-seconds" aria-hidden="true">10</span></Button>

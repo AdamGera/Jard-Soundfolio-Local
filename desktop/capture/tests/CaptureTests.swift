@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 import ScreenCaptureKit
 
@@ -19,6 +20,184 @@ private func checkMix() throws {
         only.add([1, -1], at: 0, from: source)
         try check(only.render(through: 2) == [32767, -32767], "single-source gain")
     }
+}
+
+private func checkMeetingInputRoute() throws {
+    let builtIn = InputDevice(id: 1, name: "Built-in", uid: "internal", transport: 0)
+    let saved = InputDevice(id: 2, name: "Saved", uid: "saved", transport: 0)
+    let headset = InputDevice(id: 3, name: "Headset", uid: "headset", transport: 0)
+    let all = [builtIn, saved, headset]
+    var route = MeetingInputRoute()
+    route.observeCall([headset.uid])
+    route.observeCall([])
+    route.observeCall([builtIn.uid, headset.uid])
+    let plan = route.candidates(savedUID: saved.uid, available: all, system: builtIn)
+    try check(plan == [headset, saved, builtIn], "pin the call input during mute and across reordered reports")
+    try check(route.candidates(savedUID: saved.uid, available: [saved, builtIn], system: builtIn) == [saved, builtIn],
+              "unavailable call input falls back to the saved microphone")
+    route.observeCall([builtIn.uid])
+    let changed = route.candidates(savedUID: saved.uid, available: all, system: builtIn)
+    try check(changed == [builtIn, saved], "follow the replacement call route and deduplicate the system default")
+    try check(route.canOpen(plan, at: 0), "first open is immediate")
+    var now = 0.0
+    for delay: Double in [1, 2, 4, 8, 16, 30, 30, 30] {
+        route.retry(after: now, hasWorkingInput: true)
+        try check(!route.canOpen(plan, at: now + delay - 0.01), "failed preference waits before retry")
+        now += delay
+        try check(route.canOpen(plan, at: now), "retry is due")
+    }
+    route.retry(after: now, hasWorkingInput: true)
+    try check(!route.canOpen(plan, at: now + 100), "stop retrying an unopenable preference while a fallback works")
+    try check(route.canOpen(changed, at: now), "a device change resets the budget")
+    try check(route.candidates(savedUID: nil, available: [], system: .unavailable).isEmpty,
+              "no device does not fabricate a route")
+}
+
+private struct FixtureSystemAudio: MeetingSystemAudioConnection {
+    var usable: Bool
+    let closed: () -> Void
+    func stop() async { closed() }
+}
+
+private func checkMeetingSystemAudioSupervisor() async throws {
+    var attempts = [MeetingSystemAudioMode]()
+    var availability = [Bool]()
+    var delays = [Duration]()
+    var closed = 0
+    await superviseMeetingSystemAudio(mode: .tapAndScreen, hostPID: nil, receive: { _, _, _ in },
+                                    change: { available, _ in availability.append(available) },
+                                    open: { backend, _, _ in
+        attempts.append(backend)
+        if backend == .tap || attempts.count > 2 { throw CaptureError("The fixture backend could not open.") }
+        return FixtureSystemAudio(usable: false) { closed += 1 }
+    }, pause: { duration in
+        delays.append(duration)
+        return delays.count < 2
+    })
+    try check(attempts == [.tap, .screen, .tap, .screen], "prefer a tap and fall back only when authorized")
+    try check(availability == [true, false] && closed == 1, "close the failed source and report a single outage")
+    try check(delays == [.seconds(1), .seconds(2)], "failed system audio restarts back off")
+
+    attempts.removeAll()
+    closed = 0
+    await superviseMeetingSystemAudio(mode: .tap, hostPID: nil, receive: { _, _, _ in }, change: { _, _ in },
+                                    open: { backend, _, _ in
+        attempts.append(backend)
+        return FixtureSystemAudio(usable: true) { closed += 1 }
+    }, pause: { _ in false })
+    try check(attempts == [.tap] && closed == 1, "stopping closes the current tap without opening ScreenCaptureKit")
+}
+
+private func checkMeetingMicrophoneSilence() throws {
+    var input = MeetingMicrophoneSilence()
+    let owners: Set<pid_t> = [10, 11]
+    input.observe(from: 0, to: 2, lastSignalEnd: nil)
+    input.observe(from: 2.1, to: 4.1, lastSignalEnd: nil)
+    try check(input.poll(at: 4.1, callUsesInput: true, activeOwners: owners) == nil,
+              "missing mic samples cannot count as silence")
+    input.observe(from: 4.1, to: 5.2, lastSignalEnd: nil)
+    try check(input.poll(at: 5.2, callUsesInput: false, activeOwners: owners) == nil,
+              "a call on another route cannot trigger a reopen")
+    try check(input.poll(at: 6, callUsesInput: true, activeOwners: owners) == nil,
+              "stale evidence cannot trigger a reopen")
+    try check(input.poll(at: 5.2, callUsesInput: true, activeOwners: owners) == .quick && !input.warning,
+              "try recovering three seconds of contiguous digital silence before warning")
+    input.beginRecovery(.quick, at: 5.2)
+    input.observe(from: 6, to: 9, lastSignalEnd: nil)
+    try check(input.poll(at: 9, callUsesInput: true, activeOwners: owners) == .quick,
+              "a second quick reopen is available")
+    input.beginRecovery(.quick, at: 9)
+    _ = input.poll(at: 9.5, callUsesInput: true, activeOwners: [10])
+    input.observe(from: 10, to: 13, lastSignalEnd: nil)
+    try check(input.poll(at: 13, callUsesInput: true, activeOwners: owners) == nil && input.warning,
+              "warn when the quick budget is spent and ignore releases during the clock reset")
+    try check(input.poll(at: 13, callUsesInput: true, activeOwners: nil) == nil,
+              "a failed CoreAudio snapshot does not count as an app release")
+    try check(input.poll(at: 13, callUsesInput: false, activeOwners: [11]) == .released,
+              "release by the call app can authorize a retry")
+    input.deferRecovery(.released)
+    try check(input.poll(at: 13, callUsesInput: false, activeOwners: [11]) == .released && input.warning,
+              "dictation defers the recovery without spending it")
+    input.beginRecovery(.released, at: 13)
+    for index in 0..<2 {
+        let now = 18.0 + 5.0 * Double(index)
+        input.observe(from: now - 4, to: now, lastSignalEnd: nil)
+        _ = input.poll(at: now, callUsesInput: true, activeOwners: owners)
+        try check(input.poll(at: now, callUsesInput: true, activeOwners: [10]) == .released,
+                  "an external release permits another retry until the episode cap")
+        input.beginRecovery(.released, at: now)
+    }
+    input.observe(from: 24, to: 28, lastSignalEnd: nil)
+    _ = input.poll(at: 28, callUsesInput: true, activeOwners: owners)
+    try check(input.poll(at: 28, callUsesInput: true, activeOwners: [10]) == nil && input.warning,
+              "three release retries per warning episode")
+    input.changeDevice()
+    try check(input.warning && input.poll(at: 28, callUsesInput: true, activeOwners: owners) == nil,
+              "a route change discards old evidence but keeps the warning until signal returns")
+    input.observe(from: 28, to: 28.1, lastSignalEnd: 28.00001)
+    try check(!input.warning, "one nonzero sample clears the warning")
+    input.observe(from: 28.1, to: 31.1, lastSignalEnd: nil)
+    try check(input.poll(at: 31.1, callUsesInput: true, activeOwners: owners) == nil && input.warning,
+              "signal does not replenish the recording's quick reopen budget")
+    try check(input.poll(at: 31.1, callUsesInput: true, activeOwners: [10]) == .released,
+              "signal replenishes the per-episode release retry budget")
+}
+
+private func checkDictationReleaseTail() throws {
+    let frame = DictationVoice.frameSize
+    let release = 25 * frame + 19
+    let spoken = (0..<frame).map { Float(0.08 * sin(Double($0) * 0.07)) + 0.2 }
+    let quiet = [Float](repeating: 0.2, count: frame)
+    func cutoff(_ ranges: [Range<Int>], captured: Int = 60) -> Int? {
+        var timeline = Timeline(mode: .mic)
+        var voice = DictationVoice()
+        for index in 0..<captured {
+            let active = ranges.contains { $0.contains(index) }
+            timeline.add(active ? spoken : quiet, at: index * frame, from: .mic)
+            voice.observe(timeline)
+            _ = timeline.render(through: max(0, (index - 50) * frame))
+        }
+        return voice.cutoff(after: release, through: timeline.micEnd)
+    }
+    try check(cutoff([13..<29], captured: 35) == nil, "wait for the exact minimum tail frame")
+    try check(cutoff([13..<29]) == release + DictationVoice.base, "short trailing syllable uses the minimum tail")
+    try check(cutoff([34..<35]) == release + DictationVoice.base, "a click does not grow the tail")
+    try check(cutoff([13..<32]) == release + DictationVoice.base, "three quiet frames break speech before the minimum tail")
+    try check(cutoff([13..<33]) == 43 * frame, "two quiet frames allow speech to carry into the tail")
+    try check(cutoff([13..<39, 41..<42]) == 50 * frame, "a brief inter-syllable gap does not end the tail")
+    try check(cutoff([13..<57]) == release + DictationVoice.cap, "ongoing speech cannot grow beyond the cap")
+}
+
+private func checkWarmClockRecovery() throws {
+    func range(_ low: Double, _ high: Double) -> AudioValueRange { AudioValueRange(mMinimum: low, mMaximum: high) }
+    let common = [range(44_100, 48_000)]
+    try check(alternateMicrophoneRate(from: 48_000, supported: common) == 44_100, "prefer 44.1 kHz when coming from 48 kHz")
+    try check(alternateMicrophoneRate(from: 44_100, supported: common) == 48_000, "prefer 48 kHz when supported")
+    try check(alternateMicrophoneRate(from: 24_000, supported: [range(16_000, 24_000)]) == 16_000, "use the advertised fallback")
+    try check(alternateMicrophoneRate(from: 48_000, supported: [range(48_000, 48_000)]) == nil, "single-rate input reopens normally")
+    try check(resetMicrophoneClock(.unavailable) == .unavailable, "missing device cannot reset its clock")
+    var reads = [UInt32(1), 0].makeIterator()
+    try check(microphoneClockIdle(readRunning: { reads.next() }, pause: {}), "wait for the retired stream to stop")
+    try check(!microphoneClockIdle(readRunning: { 1 }, pause: {}), "skip changing the clock of an active device")
+    try check(!microphoneClockIdle(readRunning: { nil }, pause: {}), "skip when device activity cannot be read")
+
+    var writes: [Double] = []
+    var resets = 0
+    var result = cycleMicrophoneClock(original: 48_000, alternate: 44_100, set: { writes.append($0); return true },
+                                     settled: { _ in true }, prime: { resets += 1; return true })
+    try check(result == .reset && writes == [44_100, 48_000] && resets == 1, "prime exactly once and restore the original clock")
+    writes.removeAll()
+    result = cycleMicrophoneClock(original: 48_000, alternate: 44_100, set: { writes.append($0); return true },
+                                 settled: { $0 == 48_000 }, prime: { resets += 1; return false })
+    try check(result == .failed && writes == [44_100, 48_000] && resets == 1, "restore when the alternate failed to settle")
+    writes.removeAll()
+    result = cycleMicrophoneClock(original: 48_000, alternate: 44_100, set: { writes.append($0); return true },
+                                 settled: { _ in true }, prime: { false })
+    try check(result == .failed && writes == [44_100, 48_000], "restore even when the throwaway stream failed")
+    writes.removeAll()
+    result = cycleMicrophoneClock(original: 48_000, alternate: 44_100, set: { writes.append($0); return true },
+                                 settled: { $0 == 44_100 }, prime: { true })
+    try check(result == .restoreFailed && writes == [44_100, 48_000, 48_000], "bounded restore failures are visible")
 }
 
 private func checkClockDrift() throws {
@@ -219,8 +398,170 @@ private func checkFile(directory: URL, seconds: Int) throws {
     print("Verified \(seconds)s and \(sink.frames) samples on disk, with labeled mic/system markers.")
 }
 
+private func checkColdMicrophoneOpen() async throws {
+    let preferred = InputDevice(id: 9, name: "USB microphone", uid: "usb", transport: 0)
+    let fallback = InputDevice(id: 5, name: "System microphone", uid: "default", transport: 0)
+    for failures in 0...3 {
+        var attempts = [InputDevice]()
+        var waits = [Duration]()
+        let result = try await openColdMicrophone(
+            selected: { preferred }, systemDefault: { fallback }, stopped: { false },
+            open: { device in
+                attempts.append(device)
+                if device == preferred && attempts.count <= failures { throw CaptureError("Input still waking.") }
+            },
+            pause: { waits.append($0) }
+        )
+        let expectedAttempts = Array(repeating: preferred, count: min(failures + 1, 3)) + (failures == 3 ? [fallback] : [])
+        try check(attempts == expectedAttempts, "try the preferred microphone before the system input")
+        try check(waits == Array(repeating: .milliseconds(100), count: min(failures, 2)), "retry spacing")
+        try check(result == (failures == 3 ? .systemDefault : .selected), "report the successful microphone route")
+    }
+    for selection in [nil, InputDevice.unavailable] {
+        var attempts = [InputDevice]()
+        let result = try await openColdMicrophone(
+            selected: selection.map { device in { device } }, systemDefault: { fallback }, stopped: { false },
+            open: { attempts.append($0) },
+            pause: { _ in throw CaptureError("Default should not wait for a missing device.") }
+        )
+        try check(result == .systemDefault && attempts == [fallback], "automatic and unlisted selections open the default directly")
+    }
+    var stopped = false
+    var attempts = [InputDevice]()
+    let stoppedDuringRetry = try await openColdMicrophone(
+        selected: { preferred }, systemDefault: { fallback }, stopped: { stopped },
+        open: { device in attempts.append(device); throw CaptureError("Input still waking.") },
+        pause: { _ in stopped = true }
+    )
+    try check(stoppedDuringRetry == .abandoned && attempts == [preferred], "release prevents further attempts")
+    stopped = false
+    let stoppedDuringOpen = try await openColdMicrophone(
+        selected: nil, systemDefault: { fallback }, stopped: { stopped },
+        open: { _ in stopped = true }
+    )
+    try check(stoppedDuringOpen == .abandoned, "a late successful open is abandoned after cancellation")
+    attempts.removeAll()
+    do {
+        _ = try await openColdMicrophone(
+            selected: { preferred }, systemDefault: { fallback }, stopped: { false },
+            open: { device in attempts.append(device); throw RecordingPermissionError(source: .mic) }
+        )
+        throw CaptureError("Permission denial must reach the permission flow.")
+    } catch is RecordingPermissionError {
+        try check(attempts == [preferred], "permission denial skips retries and fallback")
+    }
+    attempts.removeAll()
+    do {
+        _ = try await openColdMicrophone(
+            selected: { preferred }, systemDefault: { fallback }, stopped: { false },
+            open: { device in
+                attempts.append(device)
+                throw CaptureError(device == fallback ? "Default also unavailable." : "Input still waking.")
+            },
+            pause: { _ in }
+        )
+        throw CaptureError("An unavailable default must fail the take.")
+    } catch let error as CaptureError {
+        try check(attempts == [preferred, preferred, preferred, fallback] && error.message == "Default also unavailable.",
+                  "report the final device error once all routes fail")
+    }
+}
+
+private func checkDictationInputRoute() async throws {
+    let internalMic = InputDevice(id: 1, name: "Internal", uid: "BuiltInMicrophoneDevice", transport: kAudioDeviceTransportTypeBuiltIn)
+    let usb = InputDevice(id: 2, name: "USB", uid: "usb", transport: kAudioDeviceTransportTypeUSB)
+    let headset = InputDevice(id: 3, name: "Headset", uid: "headset", transport: kAudioDeviceTransportTypeBluetoothLE)
+    let headsetJack = InputDevice(id: 4, name: "Headphone jack", uid: "BuiltInHeadphoneInputDevice", transport: kAudioDeviceTransportTypeBuiltIn)
+    let olderJack = InputDevice(id: 5, name: "External microphone", uid: "BuiltInInputDevice",
+                               transport: kAudioDeviceTransportTypeBuiltIn, inputDataSource: 0x656d6963)
+    let lineIn = InputDevice(id: 6, name: "Line in", uid: "BuiltInLineSource",
+                             transport: kAudioDeviceTransportTypeBuiltIn, inputDataSource: 0x6c696e65)
+    let virtual = InputDevice(id: 7, name: "Virtual", uid: "virtual", transport: kAudioDeviceTransportTypeVirtual)
+    let aggregate = InputDevice(id: 8, name: "Aggregate", uid: "aggregate", transport: kAudioDeviceTransportTypeAggregate)
+    let phone = InputDevice(id: 9, name: "Phone", uid: "phone", transport: kAudioDeviceTransportTypeContinuityCaptureWireless)
+
+    func route(_ saved: InputDevice? = nil, _ system: InputDevice, _ available: [InputDevice],
+               closed: Bool = true, avoidBluetooth: Bool = false) -> DictationInputRoute {
+        DictationInputRoute.resolve(savedUID: saved?.uid, available: available, systemDefault: system,
+                                    lidClosed: closed, avoidBluetooth: avoidBluetooth)
+    }
+    let all = [internalMic, virtual, aggregate, phone, usb]
+    try check(route(internalMic, internalMic, all).saved == nil, "a saved internal microphone stands aside with the lid closed")
+    try check(route(internalMic, internalMic, all).system == usb, "the stand-in skips virtual, aggregate, and Continuity inputs")
+    try check(route(nil, .unavailable, all, closed: false).primary == internalMic, "internal input is preferred when the default is missing with the lid open")
+    try check(route(nil, internalMic, all, closed: false).primary == internalMic, "reopening restores the eligible default")
+    try check(route(usb, internalMic, all).saved == usb, "closing the lid keeps an explicit external selection")
+    for jack in [headsetJack, olderJack, lineIn] {
+        try check(route(nil, internalMic, [internalMic, jack]).primary == jack, "wired jack remains usable with the lid closed")
+    }
+    try check(route(phone, internalMic, all).primary == phone, "an explicit Continuity microphone remains eligible")
+    try check(route(nil, virtual, all).primary == virtual, "an explicit system-default virtual input remains eligible")
+    try check(route(nil, headset, [headset, usb], avoidBluetooth: true).primary == usb, "Bluetooth preference picks another physical input")
+    try check(route(nil, headset, [headset, internalMic], avoidBluetooth: true).primary == headset, "Bluetooth default remains usable as the last resort")
+    try check(route(headset, headset, [headset, usb], avoidBluetooth: true).primary == headset, "an explicit headset stays selected")
+
+    let blocked = route(internalMic, internalMic, [internalMic, virtual, aggregate, phone])
+    var attempted = [InputDevice]()
+    do {
+        _ = try await openColdMicrophone(selected: { blocked.saved ?? .unavailable },
+                                         systemDefault: { try blocked.require(blocked.system) }, stopped: { false },
+                                         open: { attempted.append($0) })
+        throw CaptureError("The closed-lid input was unexpectedly available.")
+    } catch let error as CaptureError {
+        try check(error.message == MicrophoneLid.unavailableMessage && attempted.isEmpty,
+                  "cold dictation explains the lid and opens no input if only the internal microphone is usable")
+    }
+    print("Dictation input routing verified the lid, wired jacks, explicit routes, and physical fallback order.")
+}
+
+private func checkWarmMicrophoneRetry() throws {
+    var open = WarmMicrophoneRetry()
+    var start = 100.0
+    for delay in [0.25, 0.5, 1, 2, 4, 5, 5] {
+        open.openFailed(at: start)
+        try check(!open.canOpen(at: start + delay - 0.01), "failed open waits before retry")
+        start += delay
+        try check(open.canOpen(at: start), "failed open retries within the 5-second ceiling")
+    }
+    open.opened()
+    open.openFailed(at: start)
+    try check(open.canOpen(at: start + 0.25), "successful open clears ordinary open failures")
+
+    var stream = WarmMicrophoneRetry()
+    start = 100
+    for delay in [0.25, 0.5, 1, 2, 4, 8, 16, 32, 60, 60] {
+        stream.opened()
+        stream.streamFailed(at: start, steady: false)
+        try check(!stream.canOpen(at: start + delay - 0.01), "a short-lived replacement keeps the stream backoff")
+        try check(stream.canOpen(at: start, retryNow: true), "a route change or gesture can retry before the deadline")
+        start += delay
+        try check(stream.canOpen(at: start), "a stalled stream retries within the 60-second ceiling")
+    }
+    stream.openFailed(at: start)
+    try check(!stream.canOpen(at: start + 59), "failed open during a stall retains the stall ceiling")
+    stream.streamFailed(at: start, steady: true)
+    try check(stream.canOpen(at: start), "a steady stream is replaced immediately")
+    stream.openFailed(at: start)
+    try check(stream.canOpen(at: start + 0.25), "steady delivery resets the open retry delay")
+
+    var delivery = WarmMicrophoneDelivery(openedAt: 100)
+    try check(!delivery.stalled(at: 103.999) && delivery.stalled(at: 104), "an open with no packets gets a 4-second grace period")
+    for time in [101.0, 103, 106, 108] {
+        let accepted = delivery.receive(at: time)
+        try check(accepted && !delivery.steady, "an open becomes steady only after 8 seconds of delivery")
+    }
+    let accepted = delivery.receive(at: 109)
+    try check(accepted && delivery.steady && !delivery.stalled(at: 112.99), "a continuous 8-second stream is steady")
+    let late = delivery.receive(at: 113.1)
+    try check(!late && delivery.stalled(at: 113.1) && delivery.steady, "a packet after an audio gap never revives a failed stream")
+    var replacement = WarmMicrophoneDelivery(openedAt: 120)
+    _ = replacement.receive(at: 120.5)
+    try check(!replacement.steady, "a replacement stream must prove delivery on its own")
+    print("Warm microphone verified open and stream backoff, urgent retry, and steady packet delivery.")
+}
+
 @main private enum Tests {
-    static func main() throws {
+    static func main() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -230,6 +571,18 @@ private func checkFile(directory: URL, seconds: Int) throws {
         try check(isSystemCaptureDenial(denial) && isSystemCaptureDenial(multiple), "recognize direct and wrapped TCC denial")
         try check(!isSystemCaptureDenial(NSError(domain: SCStreamErrorDomain, code: SCStreamError.Code.failedToStart.rawValue)), "unrelated stream failures stay distinct")
         try checkMix()
+        try checkMeetingInputRoute()
+        try await checkMeetingSystemAudioSupervisor()
+        try checkMeetingMicrophoneSilence()
+        try checkDictationReleaseTail()
+        let packets: [MicrophonePacket] = [([0, 1, 2, 3], 0), ([4, 5], 4.0 / Double(Timeline.rate))]
+        let queued = microphonePreRoll(packets, from: 2.5 / Double(Timeline.rate))
+        try check(queued.flatMap { $0.samples } == [3, 4, 5], "warm pre-roll trims packets at the requested sample boundary")
+        try check(queued.first?.time == 3.0 / Double(Timeline.rate), "the first trimmed packet keeps its new clock origin")
+        try await checkColdMicrophoneOpen()
+        try checkWarmClockRecovery()
+        try checkWarmMicrophoneRetry()
+        try await checkDictationInputRoute()
         try checkClockDrift()
         try checkConverter()
         try checkMicContinuity()

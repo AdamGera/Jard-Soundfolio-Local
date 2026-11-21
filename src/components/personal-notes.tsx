@@ -1,3 +1,4 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { EditorContent, useEditor, useEditorState, type JSONContent } from "@tiptap/react"
 import { closeHistory } from "@tiptap/pm/history"
@@ -27,6 +28,7 @@ type Props = {
 
 export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverview,
   notesChanged, overviewBusy, languages, dictationEnabled, onDictationBusy }: Props) {
+  const { t } = useInterfaceLanguage()
   const storageKey = `jard.personalNotes.${sessionId}`
   const [recovered] = useState(() => readNoteDraft(storageKey))
   const [saveState, setSaveState] = useState<"saved" | "pending" | "error" | "conflict">(recovered ? "pending" : "saved")
@@ -37,6 +39,7 @@ export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverv
   const mounted = useRef(false)
   const conflict = useRef(false)
   const position = useRef(1)
+  const fieldRef = useRef<HTMLElement>(null)
   const [linkOpen, setLinkOpen] = useState(false)
   const [url, setUrl] = useState("")
   function save(): Promise<boolean> {
@@ -113,10 +116,11 @@ export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverv
 
   const empty = useEditorState({
     editor,
-    selector: ({ editor }) => editor.isEmpty && editor.state.doc.childCount === 1
+    selector: ({ editor }) => !editor.isDestroyed && editor.isEmpty && editor.state.doc.childCount === 1
       && editor.state.doc.firstChild?.type.name === "paragraph",
   })
   const dictation = useNoteDictation(languages, text => {
+    if (!mounted.current || editor.isDestroyed) return
     const at = position.current
     const space = (sample: string) => sample && !/\s/u.test(sample) ? " " : ""
     const before = editor.state.doc.textBetween(Math.max(0, at - 1), at)
@@ -127,24 +131,25 @@ export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverv
   }, onDictationBusy)
 
   function startDictation() {
-    if (!dictationEnabled || dictation.phase !== "idle") return
+    if (!dictationEnabled || dictation.phase !== "idle" || editor.isDestroyed) return
     position.current = editor.state.selection.to
     void dictation.start()
   }
   const runCommand = useEffectEvent((event: Event) => {
     const action = (event as CustomEvent<"dictate" | "link">).detail
     if (action === "dictate") startDictation()
-    if (action === "link") {
+    if (action === "link" && !editor.isDestroyed) {
       setUrl(editor.getAttributes("link").href ?? "")
       setLinkOpen(true)
     }
   })
   useEffect(() => {
-    const field = editor.view.dom
+    const field = fieldRef.current
+    if (!field) return
     const listener = (event: Event) => runCommand(event)
     field.addEventListener(NOTES_COMMAND_EVENT, listener)
     return () => field.removeEventListener(NOTES_COMMAND_EVENT, listener)
-  }, [editor])
+  }, [])
 
   async function resolveConflict(keepEdits: boolean) {
     try {
@@ -164,7 +169,7 @@ export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverv
     }
   }
 
-  return <section className="personal-notes" aria-label="Personal notes editor"
+  return <section ref={fieldRef} className="personal-notes" aria-label="Personal notes editor"
     data-can-dictate={dictationEnabled && dictation.phase === "idle"}>
     <div className="personal-note-field">
       {empty && <span className="personal-note-placeholder" aria-hidden="true">
@@ -195,7 +200,7 @@ export function PersonalNotesEditor({ sessionId, initial, onSaved, onUpdateOverv
         setUrl(event.target.value)
       }} autoFocus />
       <Button type="submit" size="sm">Apply link</Button>
-      <Button type="button" size="sm" variant="ghost" onClick={() => { setLinkOpen(false); editor.commands.focus() }}>Cancel</Button>
+      <Button type="button" size="sm" variant="ghost" onClick={() => { setLinkOpen(false); editor.commands.focus() }}>{t("Cancel")}</Button>
     </form>}
     {(dictation.phase !== "idle" || dictation.notice) && <aside className="dictation-preview">
       <div role="status">{dictation.notice || ({

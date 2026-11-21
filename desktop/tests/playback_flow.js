@@ -51,6 +51,15 @@
     return connect.call(this,target,...args)
   }
   try {
+    if (window.jardDesktop) {
+      const dictation = await window.jardDesktop.request("systemDictation", { action: "status" }).catch(() => null)
+      if (dictation?.onboarding && !["done", "later"].includes(dictation.onboarding)) {
+        const later = await until(() => [...document.querySelectorAll(".dictation-tour button")].find(
+          button => button.textContent.trim() === "Set up later"), "First-run deferral")
+        later.click()
+        await until(() => !document.querySelector(".dictation-tour"), "Tour dismissed")
+      }
+    }
     if (!one(".session-heading h1")) await click(".library-open")
     await until(()=>audio()?.readyState>=1,"Audio metadata")
     await click('[role="tab"][id$="-trigger-timeline"]')
@@ -84,8 +93,19 @@
     if ([...document.querySelectorAll(".playback-wave i")].some(el=>getComputedStyle(el).transform!=="none")) {
       throw Error("Paused wave is still animated")
     }
+    const atSwitch=audio().currentTime
+    const picker=one(".session-audio-source select")
+    picker.value="mic"
+    picker.dispatchEvent(new Event("change",{bubbles:true}))
+    await until(()=>audio().src.endsWith("?track=mic") && audio().readyState>=1 &&
+      Math.abs(audio().currentTime-atSwitch)<.1 && audio().paused,"Switch to microphone at the same paused timestamp")
     await click('.play-button[aria-label="Play"]')
     await until(()=>!audio().paused && viewer() && one(".audio-launcher").dataset.playing==="true","Play button resumes")
+    picker.value="system"
+    picker.dispatchEvent(new Event("change",{bubbles:true}))
+    await until(()=>audio().src.endsWith("?track=system") && audio().readyState>=1 &&
+      !audio().paused && audio().currentTime>=atSwitch-.1,"Switch to Mac audio and continue playback")
+    results.playbackSources=true
     await click('.play-button[aria-label="Pause"]')
     await close()
     await click(".timeline-overlay input",.65)

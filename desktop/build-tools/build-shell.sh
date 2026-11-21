@@ -29,14 +29,20 @@ if [[ ! -f "$updater" || "$sdk/src/updater/c_api.zig" -nt "$updater" || "$sdk/sr
     "$zig" build-obj -target aarch64-macos.26.0 -O ReleaseSmall -lc -fcompiler-rt "$sdk/src/updater/c_api.zig" "-femit-bin=$updater.$$"
     mv "$updater.$$" "$updater"
 fi
-sources=("$desktop/mac_host.m")
+sources=("$desktop/mac_host.m" "$desktop/jard_interface_language.m" "$desktop/system_dictation.m" "$desktop/jard_login_item.m" "$desktop/jard_recording_environment.m" "$desktop/jard_dictation_media.m" "$desktop/jard_dictation_browser.m" "$desktop/jard_dictation_typing.m" "$desktop/jard_secure_hotkeys.m" "$desktop/jard_updater.m" "$desktop/jard_annotation.m" "$desktop/jard_annotation_ink.m" "$desktop/jard_annotation_region.m" "$desktop/jard_annotation_route_panel.m" "$desktop/jard_annotation_terminal.m" "$desktop/jard_phone_annotation.m" "$desktop/jard_meetings.m" "$desktop/jard_meeting_audio_access.m" "$desktop/jard_meeting_delta.m" "$desktop/meeting_presence.m" "$desktop/jard_calendar.m" "$desktop/jard_meeting_panel.m")
 if [[ -n "${JARD_TEST_SOURCE:-}" ]]; then
     [[ "$binary" != "$desktop/zig-out/bin/jard-soundfolio-local" ]] || { echo "Supply a separate output path for the QA host." >&2; exit 1; }
     flags+=(-DJARD_TESTING=1)
     sources+=("$JARD_TEST_SOURCE")
 fi
 frameworks=()
-for name in AppKit WebKit AVFoundation Accelerate AudioToolbox CoreMedia CoreVideo CoreGraphics ImageIO MediaToolbox Security ScreenCaptureKit Metal QuartzCore Foundation CoreText UniformTypeIdentifiers; do
+for name in AppKit WebKit AVFoundation Accelerate AudioToolbox CoreAudio CoreMedia CoreMediaIO IOKit CoreVideo CoreGraphics CoreImage ImageIO MediaToolbox Security ScreenCaptureKit Metal QuartzCore Foundation CoreText UniformTypeIdentifiers ApplicationServices Carbon ServiceManagement EventKit; do
     frameworks+=(-framework "$name")
 done
-xcrun clang "${flags[@]}" "${sources[@]}" "$object" "$updater" "${frameworks[@]}" -o "$binary"
+indicator="$desktop/.build/jard-indicator.o"
+xcrun swiftc -O -whole-module-optimization -parse-as-library -c -module-name JardIndicator \
+    -target arm64-apple-macos26.0 "$desktop/indicator/DotScopeSimulation.swift" \
+    "$desktop/indicator/JardDictationMeter.swift" -o "$indicator.$$"
+mv "$indicator.$$" "$indicator"
+xcrun clang "${flags[@]}" "${sources[@]}" "$object" "$updater" "$indicator" "${frameworks[@]}" \
+    -L "$(xcrun --show-sdk-path)/usr/lib/swift" -lswiftCore -o "$binary"

@@ -11,15 +11,16 @@ export function SpeakerAnalytics({ result, time, ready, seek }: {
   const [hover, setHover] = useState<number | null>(null)
   const rows = result.speakerActivity
   const duration = result.durationSeconds ?? 0
+  const names = result.speakerNames
   const lanes = useMemo(() => rows?.map(row => (
           <div className="timeline-lane" key={row.speaker}>
-            <span>{speakerLabel(row.speaker)}</span>
+            <span>{speakerLabel(row.speaker, names)}</span>
             <svg viewBox={`0 0 ${duration} 1`} preserveAspectRatio="none" aria-hidden="true">
               <path stroke={speakerColor(row.speaker)} strokeWidth="1" fill="none"
                 d={row.intervals.map(span => `M${span.start} .5H${span.end}`).join("")} />
             </svg>
           </div>
-        )), [rows, duration])
+        )), [rows, duration, names])
   const cursor = Math.min(duration, time)
   const reading = hover ?? cursor
   if (!rows?.length || !duration) {
@@ -32,7 +33,7 @@ export function SpeakerAnalytics({ result, time, ready, seek }: {
   }
   const active = rows.filter(row =>
     row.intervals.some(span => span.start <= reading && reading < span.end))
-  const atCursor = active.map(row => speakerLabel(row.speaker)).join(" + ") || "Silence"
+  const atCursor = active.map(row => speakerLabel(row.speaker, names)).join(" + ") || "Silence"
   return (
     <div className="analytics">
       <div className="analytics-title"><h2>Speaker timeline</h2><span>{clock(duration)} {result.interruption ? "processed" : "total"}</span></div>
@@ -58,7 +59,7 @@ export function SpeakerAnalytics({ result, time, ready, seek }: {
       <ul className="speaker-shares">
         {rows.map(row => (
           <li key={row.speaker} style={{ "--speaker-color": speakerColor(row.speaker) } as CSSProperties}>
-            <span className="speaker-name"><i />{speakerLabel(row.speaker)}</span>
+            <span className="speaker-name"><i />{speakerLabel(row.speaker, names)}</span>
             <span className="share-track" aria-hidden="true"><i style={{ width: `${row.share * 100}%` }} /></span>
             <span>{row.seconds < 1 ? "<1s" : clock(row.seconds)}</span><strong>{percent.format(row.share)}</strong>
           </li>

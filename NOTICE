@@ -5,3 +5,8 @@ https://www.jard.ai/
 The bundled place-name index contains selected names and alternate spellings from
 GeoNames (https://www.geonames.org/), distributed under CC BY 4.0
 (https://creativecommons.org/licenses/by/4.0/), via geonamescache 3.0.2.
+
+The Dot Scope simulation, dictation sound assets, and portions of the dictation,
+meeting audio, wired capture, localization, and transformation code are by
+Christopher Langton. See licenses/Christopher-Langton-MIT.txt for the full
+copyright and MIT license notices.

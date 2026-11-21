@@ -1,0 +1,720 @@
+"""Local status, dictation, meetings, annotations, history, and file transcription for Jard."""
+import argparse
+import asyncio
+from contextlib import ExitStack, closing
+import errno
+import json
+import os
+from pathlib import Path
+import plistlib
+import select
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+from uuid import UUID
+
+import httpx
+
+from diagnostics import EVENT_LOG, PROCESS_LOG, tail_log
+from dictation_settings import SETTINGS_LIMIT, validate_changes
+from engine_lifecycle import PORT, URL, desktop_control_path, library_path, running_engine
+from engine_paths import ENGINE_ROOT, WORKSPACE_ROOT
+from managed_preferences import ManagedFeatureError
+from model_installation import ModelUnavailable, ensure_model, install_model, model_status
+from native_recordings import normalize_meeting_title
+from saved_annotations import annotation_context, annotation_detail
+from saved_dictations import history_page, preferences_path, render_history
+from saved_meetings import get_meeting, meeting_detail, meetings as saved_meetings, render_export, search_meetings, timestamp
+from session_store import MissingSession, SessionStore
+
+CONTROL_LIMIT = 4 * 1024 * 1024
+
+
+class DesktopUnavailable(RuntimeError):
+    pass
+
+
+def control(root, token, action, *, timeout=12, **options):
+    message = json.dumps({"token": token, "action": action, **options}, ensure_ascii=False, allow_nan=False).encode() + b"\n"
+    try:
+        path = desktop_control_path(root)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout)
+            connection.connect(str(path))
+            connection.sendall(message)
+            with connection.makefile("rb") as output:
+                result = json.loads(output.readline(CONTROL_LIMIT))
+    except (OSError, ValueError) as error:
+        raise DesktopUnavailable("Open Jaro before using desktop controls.") from error
+    if not result.get("ok"):
+        if result.get("code") == "managed":
+            raise ManagedFeatureError(result["error"])
+        raise RuntimeError(result.get("error", "The desktop command failed."))
+    return result["result"]
+
+
+def desktop(root, action, *, timeout=12, **options):
+    try:
+        token = (root / ".native-token").read_text().strip()
+    except OSError as error:
+        raise DesktopUnavailable("Open Jaro before using desktop controls.") from error
+    return control(root, token, action, timeout=timeout, **options)
+
+
+def desktop_status(root):
+    try:
+        return desktop(root, "desktop-status", timeout=.75)
+    except DesktopUnavailable:
+        return None
+
+
+def wait_for_desktop(root, *, previous=None, timeout=20):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = desktop_status(root)
+        if status and status.get("pid") != previous:
+            return status
+        time.sleep(.2)
+    return None
+
+
+def wait_for_desktop_exit(pid, *, timeout=20):
+    if type(pid) is not int or pid <= 1:
+        raise RuntimeError("Jard returned an invalid desktop process identifier.")
+    with closing(select.kqueue()) as queue:
+        event = select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        try:
+            queue.control([event], 0, 0)
+        except OSError as error:
+            if error.errno == errno.ESRCH:
+                return True
+            raise
+        return bool(queue.control(None, 1, timeout))
+
+
+def desktop_bundle():
+    if override := os.environ.get("JARD_DESKTOP_BUNDLE_PATH"):
+        return Path(override).resolve()
+    app = Path("/Applications/Jaro.app")
+    legacy = Path("/Applications/Jard Soundfolio Local.app")
+    return legacy.resolve() if not (app / "Contents/Info.plist").is_file() and (legacy / "Contents/Info.plist").is_file() else app.resolve()
+
+
+
+def transformation_workspace(args):
+    from output_transform_runtime import execute_config
+    from output_transform_workspace import config_directory, find_config, initialize_workspace
+
+    directory = (args.directory or config_directory()).expanduser().resolve()
+    if args.action == "init":
+        result = initialize_workspace(directory)
+        return result if args.json else result["path"]
+    path = find_config(directory)
+    if path is None:
+        raise ValueError("No Jaro configuration in this folder. Run jardctl transforms init first.")
+    helper = desktop_bundle() / "Contents" / "Helpers" / "jaro-transforms"
+    if WORKSPACE_ROOT != ENGINE_ROOT and not os.environ.get("JARD_DESKTOP_BUNDLE_PATH"):
+        source = WORKSPACE_ROOT / "desktop" / ".build" / "transform-target" / "release" / "jaro-transforms"
+        if source.is_file():
+            helper = source
+    reviewed = asyncio.run(execute_config(helper, path, log_setup=True))
+    reviewed.pop("files", None)
+    if args.json:
+        return {"path": str(path), **reviewed}
+    names = [f"{row['id']} · {row['name']}" for row in reviewed["transforms"]]
+    return "\n".join([str(path), *names])
+
+
+def desktop_lifecycle(root, action, *, force=False):
+    if action == "start":
+        if status := desktop_status(root):
+            return {**status, "status": "running", "changed": False}
+        bundle = desktop_bundle()
+        if not (bundle / "Contents/Info.plist").is_file():
+            raise RuntimeError("Install Jaro before using jardctl start.")
+        command = ["/usr/bin/open", "-g"]
+        for key, value in (("RUMBLE_DATA_DIR", str(root)), ("RUMBLE_PORT", os.environ.get("RUMBLE_PORT")),
+                           ("RUMBLE_LOG_DIR", os.environ.get("RUMBLE_LOG_DIR"))):
+            if value is not None:
+                if key == "RUMBLE_LOG_DIR":
+                    value = str(Path(value).expanduser().resolve())
+                command.extend(("--env", f"{key}={value}"))
+        if subprocess.run([*command, str(bundle)], check=False, timeout=10).returncode:
+            raise RuntimeError("macOS could not open Jaro.")
+        status = wait_for_desktop(root)
+        return {**(status or {"bundle": str(bundle)}), "status": "running" if status else "starting", "changed": True}
+
+    previous = desktop(root, "desktop-" + action, timeout=90 if force else 18, **({"force": True} if force else {}))
+    if not wait_for_desktop_exit(previous["pid"]):
+        raise RuntimeError("Jard is still finishing its shutdown.")
+    if action == "quit":
+        return {**previous, "status": "stopped"}
+    status = wait_for_desktop(root, previous=previous["pid"])
+    if status and Path(status["bundle"]).resolve() != Path(previous["bundle"]).resolve():
+        raise RuntimeError("A different Jard bundle answered after restart.")
+    return {**(status or {"bundle": previous["bundle"]}), "status": "running" if status else "starting",
+            "previousPid": previous["pid"], "updateApplied": previous["updateApplied"]}
+
+
+def setting_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Repeated setting key: {key}")
+        result[key] = value
+    return result
+
+
+def apply_offline_settings(encoded):
+    bundle = desktop_bundle()
+    try:
+        with (bundle / "Contents/Info.plist").open("rb") as manifest:
+            info = plistlib.load(manifest)
+        name = info["CFBundleExecutable"]
+        if info.get("JardOfflineSettingsProtocol") != 1 or not isinstance(name, str) or not name or Path(name).name != name:
+            raise ValueError("Unsupported app bundle.")
+    except (OSError, ValueError, KeyError, plistlib.InvalidFileException) as error:
+        raise RuntimeError("Install a Jard build that supports offline settings first.") from error
+    process = subprocess.run([bundle / "Contents/MacOS" / name, "--settings-apply-offline"],
+                             input=encoded, capture_output=True, timeout=8)
+    try:
+        result = json.loads(process.stdout)
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("The app could not apply settings offline.") from error
+    if process.returncode:
+        raise RuntimeError(result.get("error", "The app could not apply settings offline."))
+    return result
+
+
+def desktop_settings(root, args):
+    match args.action:
+        case "list":
+            return desktop(root, "settings-list")
+        case "get":
+            return desktop(root, "settings-get", key=args.key)
+        case "set":
+            metadata = desktop(root, "settings-list").get(args.key)
+            if not metadata or metadata.get("readOnly"):
+                raise ValueError(f"Unknown or read-only setting: {args.key}")
+            kind = metadata["type"]
+            value = args.value
+            if kind == "boolean":
+                choices = {"true": True, "on": True, "false": False, "off": False}
+                if value.lower() not in choices:
+                    raise ValueError("Provide true, false, on, or off for this setting.")
+                value = choices[value.lower()]
+            elif kind in ("array", "integer", "number"):
+                value = json.loads(value)
+            changes = {args.key: value}
+        case "apply":
+            if args.document == "-":
+                raw = sys.stdin.buffer.read(SETTINGS_LIMIT + 1)
+            else:
+                with Path(args.document).open("rb") as source:
+                    raw = source.read(SETTINGS_LIMIT + 1)
+            if len(raw) > SETTINGS_LIMIT:
+                raise ValueError("The settings document exceeds 56,000 bytes.")
+            changes = json.loads(raw, object_pairs_hook=setting_pairs)
+            if not isinstance(changes, dict) or not changes:
+                raise ValueError("Provide a nonempty JSON object of settings.")
+    encoded = validate_changes(changes)
+    try:
+        return desktop(root, "settings-apply", changes=changes)
+    except DesktopUnavailable:
+        if args.action != "apply":
+            raise
+        return apply_offline_settings(encoded)
+
+
+def live_meeting(root, *, turns=True):
+    try:
+        return control(root, (root / ".native-token").read_text().strip(), "meeting-live", timeout=1, turns=turns)
+    except (OSError, RuntimeError):
+        return None
+
+
+def watch_meetings(token):
+    with httpx.Client(base_url=URL, trust_env=False, timeout=30) as client:
+        with client.stream("GET", "/api/meetings/events", headers={"Authorization": "Bearer " + token}) as response:
+            if response.status_code == 409:
+                raise RuntimeError("Another subscriber is already watching for finished meetings.")
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    print(line.removeprefix("data: "), flush=True)
+
+
+def transcription_service(root, scope, *, allow_prompt):
+    from sdk_discovery import read_sdk_record
+    from sdk_embedded import owned_transcriber
+
+    engine = running_engine()
+    if engine is None:
+        ensure_model(allow_prompt=allow_prompt)
+        engine = running_engine()
+        if engine is None:
+            return scope.enter_context(owned_transcriber())
+    deadline = time.monotonic() + 120
+    while engine and engine["status"] == "loading" and time.monotonic() < deadline:
+        time.sleep(.25)
+        engine = running_engine()
+    if not engine or engine["status"] != "ready":
+        raise RuntimeError("The running Jaro speech model is unavailable.")
+    return read_sdk_record(root, PORT)
+
+
+def transcribe_file(root, args):
+    from rumble_model import LANGUAGES, SAMPLE_RATE
+    from sdk_embedded import sdk_transcription
+    from transcription_pieces import SAMPLE_BYTES, audio_pieces, has_audible_samples, wav_piece
+
+    if any(code not in LANGUAGES for code in args.language):
+        raise ValueError("Choose a language from the list.")
+    parts, transcript_bytes, samples = [], 0, 0
+    service = None
+    progress = not args.json and sys.stderr.isatty()
+    try:
+        with ExitStack() as scope, closing(audio_pieces(args.file)) as pieces:
+            for pcm in pieces:
+                if has_audible_samples(pcm):
+                    if service is None:
+                        service = transcription_service(root, scope, allow_prompt=not args.json)
+                    text = sdk_transcription(service, wav_piece(pcm), args.language).strip()
+                    if text:
+                        transcript_bytes += len(text.encode("utf8")) + 1
+                        if transcript_bytes > 16 * 1024 * 1024:
+                            raise ValueError("This recording’s transcript exceeds the command’s output limit.")
+                        parts.append(text)
+                samples += len(pcm) // SAMPLE_BYTES
+                if progress:
+                    print(f"\rProcessed {samples // SAMPLE_RATE} seconds of audio…", end="", file=sys.stderr, flush=True)
+    finally:
+        if progress and samples:
+            print(file=sys.stderr)
+    if not parts:
+        no_speech(args.json)
+    text = " ".join(parts)
+    print(json.dumps({"text": text}, ensure_ascii=False) if args.json else text)
+
+
+def no_speech(json_output):
+    message = "No speech was detected."
+    print(json.dumps({"code": "no-speech", "error": message}) if json_output else message, file=sys.stderr)
+    raise SystemExit(4)
+
+
+def read_meetings(library, args, live):
+    if args.action == "list":
+        rows = saved_meetings(library, args.query, args.limit, since=args.since, until=args.until, live=live,
+                              include_in_progress=args.include_in_progress)
+        return rows if args.json else "\n".join(
+            f"{row['id']}  {(row.get('meetingStartedAt') or row['created'])[:10]}  {row['name']}"
+            + (f" ({row['status']})" if row["status"] != "complete" else "") for row in rows)
+    if args.action == "search":
+        rows = search_meetings(library, args.query, args.limit, identifier=args.meeting, since=args.since, until=args.until,
+                               live=live, include_in_progress=args.include_in_progress, fuzzy=args.fuzzy)
+        return rows if args.json else "\n".join(
+            f"{row['id']}  {timestamp(row['start']) if row['start'] is not None else '—'}  {row['title']}  {row['snippet']}"
+            for row in rows)
+    detail = meeting_detail(get_meeting(library, args.id, live=live), args.start, args.end)
+    return detail if args.json else render_export(detail, args.format or "md")
+
+
+def read_history(args):
+    if args.text and args.json:
+        raise ValueError("Choose either JSON or text output.")
+    legacy = not (
+        any(value is not None for value in (args.since, args.until, args.app, args.grep, args.search, args.limit))
+        or args.raw or args.oldest_first or args.text
+    )
+    page_size = 15 if legacy else 50
+    path = preferences_path()
+    try:
+        snapshot = desktop(library_path(), "history-snapshot", timeout=.75)
+    except RuntimeError:
+        snapshot = None
+    if not isinstance(snapshot, dict) or snapshot.get("bundleId") != path.stem:
+        snapshot = None
+    result = history_page(
+        path, since=args.since, until=args.until, app=args.app, grep=args.grep, search=args.search,
+        oldest_first=args.oldest_first, query=args.query, offset=args.offset, snapshot=snapshot,
+        limit=page_size if args.limit is None else args.limit, raw=args.raw, legacy=legacy,
+    )
+    return json.dumps(result, ensure_ascii=False) if args.json or legacy else render_history(result)
+
+
+def read_annotations(library, args):
+    if args.action == "list":
+        return {"version": 1, "annotations": library.annotations(limit=args.limit)}
+    detail = annotation_detail(library, args.id)
+    if args.action == "context":
+        return {**annotation_context(detail), "contactSheetPath": detail["contactSheetPath"]}
+    return detail
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="jardctl", description=__doc__)
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable output.")
+    actions = parser.add_subparsers(dest="command", required=True)
+    actions.add_parser("status")
+    logs = actions.add_parser("logs", help="Read local diagnostic logs without opening Jaro.")
+    logs.add_argument("--process", action="store_true", help="Read the engine process log.")
+    logs.add_argument("-n", "--lines", type=int, default=50, metavar="COUNT", help="Show 0 to 10,000 recent lines.")
+    logs.add_argument("-f", "--follow", action="store_true", help="Print new lines until interrupted.")
+    actions.add_parser("start", help="Open Jaro if it is closed.")
+    quit_app = actions.add_parser("quit", help="Close the running desktop app.")
+    restart = actions.add_parser("restart", help="Reopen the running desktop app at the same path.")
+    for command in (quit_app, restart):
+        command.add_argument("--force", action="store_true", help="Stop active captures and finish saving before closing.")
+    window = actions.add_parser("window", help="Show or hide the running app's workspace.")
+    window_actions = window.add_subparsers(dest="action", required=True)
+    show_window = window_actions.add_parser("show")
+    show_window.add_argument("pane", nargs="?", default="settings",
+                             choices=("settings", "general", "dictation", "history", "output", "meetings", "annotate", "home"))
+    window_actions.add_parser("hide")
+    settings = actions.add_parser("settings", help="Read or atomically change running desktop preferences.")
+    settings_actions = settings.add_subparsers(dest="action", required=True)
+    settings_actions.add_parser("list")
+    settings_actions.add_parser("get").add_argument("key")
+    setting = settings_actions.add_parser("set")
+    setting.add_argument("key")
+    setting.add_argument("value")
+    settings_actions.add_parser("apply").add_argument("document", help="Path to a JSON settings object, or - for stdin.")
+    transforms = actions.add_parser("transforms", help="Create or check a local transformation configuration.")
+    transform_actions = transforms.add_subparsers(dest="action", required=True)
+    for action in ("init", "check"):
+        command = transform_actions.add_parser(action)
+        command.add_argument("--directory", type=Path, help="Use a configuration folder other than Jaro's default.")
+        command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    vocabulary = actions.add_parser("vocabulary", help="Manage the shared dictation vocabulary.")
+    vocabulary_actions = vocabulary.add_subparsers(dest="action", required=True)
+    for name in ("list", "add", "remove"):
+        command = vocabulary_actions.add_parser(name)
+        command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        if name != "list":
+            command.add_argument("term")
+        if name == "add":
+            command.add_argument("--sounds-like", metavar="SPELLINGS", help="Comma-separated alternate spellings.")
+    login = actions.add_parser("launch-at-login", help="Read or change macOS Launch at Login.")
+    login.add_argument("enabled", nargs="?", choices=("on", "off"))
+    actions.add_parser("check-for-updates", help="Ask the desktop updater to check now.")
+    update_channel = actions.add_parser("update-channel", help="Read or select a configured desktop update channel.")
+    update_channel.add_argument("channel", nargs="?", choices=("stable", "dev"))
+    update_channel.add_argument("--confirm", metavar="OFFER", help="Confirm the displayed release digest before downloading a channel switch.")
+    model = actions.add_parser("model", help="Check or install Jaro's pinned speech model.")
+    model_commands = model.add_subparsers(dest="action", required=True)
+    speech_status = model_commands.add_parser("status")
+    speech_install = model_commands.add_parser("install")
+    speech_install.add_argument("--from", dest="source", type=Path, help="Verify and copy from a local folder.")
+    for command in (speech_status, speech_install):
+        command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    file = actions.add_parser("transcribe")
+    file.add_argument("file", type=Path)
+    file.add_argument("--language", action="append", default=[])
+    file.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    dictate = actions.add_parser("dictation")
+    dictate.add_argument("action", choices=("start", "stop", "toggle", "cancel", "paste-last"))
+    dictate.add_argument("--raw", action="store_true", help="Start without applying output processing.")
+    dictate.add_argument("--print", dest="print_transcript", action="store_true", help="Stop and write the transcript to stdout.")
+    dictate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    meetings = actions.add_parser("meetings")
+    meeting_actions = meetings.add_subparsers(dest="action", required=True)
+    for action in ("status", "stop", "copy-last"):
+        meeting_actions.add_parser(action)
+    meeting_record = meeting_actions.add_parser("record")
+    meeting_record.add_argument("--title", help="Name the meeting when recording starts.")
+    meeting_actions.add_parser("watch", help="Stream finished meeting IDs as JSON lines.")
+    listing = meeting_actions.add_parser("list")
+    listing.add_argument("--query", default="")
+    search = meeting_actions.add_parser("search")
+    search.add_argument("query")
+    search.add_argument("--meeting", help="Search a meeting UUID, unique prefix, or latest.")
+    search.add_argument("--no-fuzzy", action="store_false", dest="fuzzy")
+    listing.add_argument("--limit", type=int, choices=range(1, 201), metavar="1–200", default=20)
+    search.add_argument("--limit", type=int, choices=range(1, 51), metavar="1–50", default=10)
+    for action in (listing, search):
+        action.add_argument("--since", help="Include meetings overlapping this date or time onward.")
+        action.add_argument("--until", help="Include meetings starting before this time. A date includes that entire day.")
+        action.add_argument("--no-in-progress", action="store_false", dest="include_in_progress")
+        action.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    show = meeting_actions.add_parser("show")
+    show.add_argument("id", help="Meeting UUID, unique prefix, or latest.")
+    show.add_argument("--from", dest="start", help="Start offset in seconds, MM:SS, or HH:MM:SS.")
+    show.add_argument("--to", dest="end", help="End offset in seconds, MM:SS, or HH:MM:SS.")
+    formats = show.add_mutually_exclusive_group()
+    formats.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    for kind in ("md", "notes", "srt", "vtt"):
+        formats.add_argument("--" + kind, dest="format", action="store_const", const=kind)
+    annotate = actions.add_parser("annotate", aliases=["capture"], help="Control live annotations and read saved captures.")
+    annotation_actions = annotate.add_subparsers(dest="action", required=True)
+    annotation_list = annotation_actions.add_parser("list")
+    annotation_list.add_argument("--limit", type=int, choices=range(1, 201), metavar="1–200", default=20)
+    annotation_show = annotation_actions.add_parser("show")
+    annotation_show.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_prompt = annotation_actions.add_parser("context", help="Write a saved annotation's narration and frame times as Markdown.")
+    annotation_prompt.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_start = annotation_actions.add_parser("start", help="Ask the running app to open the macOS picker.")
+    annotation_start.add_argument("--source", choices=("display", "window", "area", "phone"), default="display",
+                                  help="capture source (phone requires a USB iPhone or iPad)")
+    annotation_start.add_argument("--language", action="append", help="Override the saved dictation language hints.")
+    annotation_status = annotation_actions.add_parser("status", help="Report the active or most recent capture.")
+    annotation_stop = annotation_actions.add_parser("stop", help="Stop and save the active capture.")
+    annotation_cancel = annotation_actions.add_parser("cancel", help="Discard the unsaved capture.")
+    annotation_destinations = annotation_actions.add_parser("destinations", help="List open local OpenCode v2 sessions.")
+    annotation_destinations.add_argument("--query", default="", help="Match a session title, directory, or ID.")
+    annotation_destinations.add_argument("--capture", help="Include the saved destination and suggestions for this annotation.")
+    annotation_remember = annotation_actions.add_parser("remember", help="Remember an OpenCode destination for a captured app, site, or terminal project.")
+    annotation_remember.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_remember.add_argument("--scope", choices=("app", "site", "terminal"), required=True)
+    annotation_remember.add_argument("--to", required=True, help="Exact OpenCode session ID.")
+    annotation_remember.add_argument("--service", required=True, help="Service identity returned by annotate destinations.")
+    annotation_remember.add_argument("--automatic", action="store_true", help="Send future matching captures after a visible countdown.")
+    annotation_route = annotation_actions.add_parser("route", help="Read or cancel a pending automatic annotation send.")
+    annotation_route.add_argument("id", help="Exact annotation Session UUID.")
+    annotation_route.add_argument("--cancel", action="store_true")
+    annotation_forget = annotation_actions.add_parser("forget", help="Remove a saved OpenCode destination rule.")
+    annotation_forget.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_forget.add_argument("--rule", required=True, help="Rule ID returned by annotate destinations.")
+    annotation_send = annotation_actions.add_parser("send", help="Queue a saved annotation in the selected OpenCode session.")
+    annotation_send.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_send.add_argument("--to", required=True, metavar="SESSION", help="Exact OpenCode session ID.")
+    annotation_send.add_argument("--service", help="Service identity returned by annotate destinations.")
+    annotation_deliveries = annotation_actions.add_parser("deliveries", help="Read recent OpenCode receipts for a capture.")
+    annotation_deliveries.add_argument("id", help="Annotation Session UUID, unique prefix, or latest.")
+    annotation_undo = annotation_actions.add_parser("undo", help="Withdraw an annotation or roll back its isolated OpenCode turn.")
+    annotation_undo.add_argument("delivery_id", help="Receipt ID returned by annotate send or annotate deliveries.")
+    annotation_undo.add_argument("--restore-files", action="store_true",
+                                 help="Allow OpenCode to restore changed files when the turn ran a successful file edit.")
+    annotation_correct = annotation_actions.add_parser("correct", help="Ask OpenCode to disregard a delivered annotation.")
+    annotation_correct.add_argument("delivery_id", help="Receipt ID returned by annotate send or annotate deliveries.")
+    for action in (annotation_list, annotation_show, annotation_prompt, annotation_start, annotation_status,
+                   annotation_stop, annotation_cancel, annotation_destinations, annotation_send, annotation_deliveries,
+                   annotation_undo, annotation_correct, annotation_remember, annotation_forget, annotation_route):
+        action.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    actions.add_parser("mcp", help="Serve read-only meeting and annotation tools over stdio.")
+    history = actions.add_parser("history", help="Read saved dictations offline or clear them through the running app.")
+    history.add_argument("--query", help="Filter a history page by text or application.")
+    history.add_argument("--offset", type=int, default=0, help="Skip this many matching entries.")
+    history.add_argument("--since", help="Include dictations from this date or time.")
+    history.add_argument("--until", help="Stop before this time. A date includes that entire day.")
+    history.add_argument("--app", help="Match the exact application name, ignoring case.")
+    history.add_argument("--grep", help="Match a literal substring in raw or final text.")
+    history.add_argument("--search", help="Rank raw and final text with fuzzy transcript search.")
+    history.add_argument("--oldest-first", action="store_true")
+    history.add_argument("--limit", type=int, metavar="1–10000")
+    history.add_argument("--raw", action="store_true", help="Include the original transcript.")
+    output = history.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    output.add_argument("--text", action="store_true", help="Read history as text.")
+    history_actions = history.add_subparsers(dest="action")
+    clear_history = history_actions.add_parser("clear", help="Remove all retained dictations and reset Paste Last.")
+    clear_history.add_argument("--yes", action="store_true", help="Confirm deletion of the entire dictation history.")
+    clear_history.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    actions.add_parser("setup")
+    args = parser.parse_args()
+    if args.command == "dictation":
+        if args.raw and args.action not in ("start", "toggle"):
+            dictate.error("--raw requires start or toggle")
+        if args.print_transcript and args.action != "stop":
+            dictate.error("--print requires stop")
+    try:
+        if args.command == "model":
+            result = (install_model(args.source, progress=not args.json and sys.stderr.isatty())
+                      if args.action == "install" else model_status())
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print("Rumble2 Flash is ready." if result["ready"] else str(ModelUnavailable()))
+            return
+        if args.command == "logs":
+            if not 0 <= args.lines <= 10_000:
+                raise ValueError("Choose a log line count from 0 to 10,000.")
+            name = PROCESS_LOG if args.process else EVENT_LOG
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+            try:
+                tail_log(name, args.lines, args.follow, sys.stdout.buffer)
+            except FileNotFoundError as error:
+                raise ValueError("Jaro has no process log yet." if args.process else "Jaro has no event log yet.") from error
+            return
+        if args.command == "history":
+            if args.action != "clear":
+                print(read_history(args))
+                return
+            if not args.yes:
+                raise ValueError("This deletes every retained dictation. Pass --yes to clear history.")
+            if (args.offset or args.oldest_first or args.raw or args.text or any(
+                value is not None for value in (args.query, args.since, args.until, args.app, args.grep, args.search, args.limit)
+            )):
+                raise ValueError("Clear history removes all entries and does not accept read filters.")
+            result = desktop(library_path(), "history-clear", confirm=True)
+            if args.json:
+                print(json.dumps(result, sort_keys=True))
+            elif result["removed"]:
+                count = result["removed"]
+                print(f"Cleared {count} dictation{'s' if count != 1 else ''}.")
+            else:
+                print("Cleared Paste Last." if result["changed"] else "History is already empty.")
+            return
+        if args.command == "transforms":
+            result = transformation_workspace(args)
+            print(json.dumps(result, ensure_ascii=False) if args.json else result)
+            return
+        root = library_path()
+        if args.command in ("annotate", "capture"):
+            if args.action in ("list", "show", "context"):
+                value = read_annotations(SessionStore(root, read_only=True), args)
+            elif args.action == "deliveries":
+                from annotation_routing import recent_deliveries
+                value = recent_deliveries(root, args.id)
+            else:
+                options = {}
+                if args.action == "start":
+                    options["source"] = args.source
+                    if args.language is not None:
+                        options["languages"] = args.language
+                elif args.action == "destinations":
+                    options["query"] = args.query
+                    if args.capture is not None:
+                        options["id"] = args.capture
+                elif args.action == "remember":
+                    options = {"id": args.id, "scope": args.scope, "target": args.to,
+                               "service": args.service, "automatic": args.automatic}
+                elif args.action == "route":
+                    options = {"id": args.id, "routeAction": "cancel" if args.cancel else "status"}
+                elif args.action == "forget":
+                    options = {"id": args.id, "ruleId": args.rule}
+                elif args.action == "send":
+                    options = {"id": args.id, "target": args.to}
+                    if args.service is not None:
+                        options["service"] = args.service
+                elif args.action in ("undo", "correct"):
+                    options["deliveryId"] = args.delivery_id
+                    if args.action == "undo" and args.restore_files:
+                        options["restoreFiles"] = True
+                try:
+                    timeout = {"undo": 26, "send": 18, "correct": 18, "destinations": 18, "remember": 18}
+                    value = desktop(root, "annotation-" + args.action,
+                                    timeout=timeout.get(args.action, 12), **options)
+                except DesktopUnavailable:
+                    if args.action != "route":
+                        raise
+                    if WORKSPACE_ROOT != ENGINE_ROOT:
+                        sys.path.insert(0, str(WORKSPACE_ROOT))
+                    from annotation_deliveries import AnnotationDeliveries
+                    from desktop.annotation_automation import AnnotationAutomation
+                    capture = str(UUID(args.id))
+                    outbox = AnnotationDeliveries(root)
+                    if args.cancel:
+                        outbox.set_pending_route(capture, "cancelled", "Automatic send cancelled.")
+                    value = AnnotationAutomation.stored_status(outbox.get_route(capture), capture)
+            if args.action == "context" and not args.json:
+                print(value["markdown"], end="")
+            else:
+                print(json.dumps(value, ensure_ascii=False))
+            return
+        if args.command == "window":
+            options = {"pane": args.pane} if args.action == "show" else {}
+            print(json.dumps(desktop(root, "window-" + args.action, **options), sort_keys=True))
+            return
+        if args.command == "vocabulary":
+            options = {}
+            if args.action != "list":
+                options["term"] = args.term.strip()
+            if args.action == "add" and args.sounds_like is not None:
+                options["soundsLike"] = [value.strip() for value in args.sounds_like.split(",")]
+            result = desktop(root, "vocabulary-" + args.action, **options)
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            elif args.action == "list":
+                for entry in result["entries"]:
+                    spellings = ", ".join(entry["soundsLike"])
+                    print(entry["term"] + (f"\t{spellings}" if spellings else ""))
+            else:
+                print("Vocabulary updated." if result["changed"] else "Vocabulary unchanged.")
+            return
+        if args.command in ("start", "quit", "restart", "settings", "launch-at-login", "check-for-updates", "update-channel"):
+            if args.command in ("start", "quit", "restart"):
+                value = desktop_lifecycle(root, args.command, force=getattr(args, "force", False))
+            elif args.command == "settings":
+                value = desktop_settings(root, args)
+            elif args.command == "update-channel":
+                if args.channel and args.confirm:
+                    raise ValueError("Select a channel first, then confirm its release offer.")
+                options = {"channel": args.channel} if args.channel else {"offer": args.confirm} if args.confirm else {}
+                value = desktop(root, args.command, **options)
+            else:
+                options = {"enabled": args.enabled == "on"} if args.command == "launch-at-login" and args.enabled else {}
+                value = desktop(root, args.command, **options)
+            print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+            return
+        if args.command == "mcp":
+            from meeting_mcp import serve
+            serve(SessionStore(root, read_only=True), lambda turns=True: live_meeting(root, turns=turns))
+            return
+        if args.command == "meetings" and args.action in ("list", "show", "search"):
+            live = live_meeting(root, turns=args.action != "list") if getattr(args, "include_in_progress", True) else None
+            result = read_meetings(SessionStore(root, read_only=True), args, live)
+            print(result.rstrip("\n") if isinstance(result, str) else json.dumps(result, ensure_ascii=False))
+            return
+        if args.command == "transcribe":
+            transcribe_file(root, args)
+            return
+        engine = running_engine()
+        if args.command == "status":
+            value = {"engine": engine["status"] if engine else "stopped", "model": engine["model"] if engine else "Reson8/Rumble-2-Flash"}
+            if engine:
+                try:
+                    value["desktop"] = desktop(root, "status")
+                except RuntimeError:
+                    pass
+        else:
+            if not engine:
+                raise RuntimeError("Open Jaro to start the local engine.")
+            token = (root / ".native-token").read_text().strip()
+            if args.command == "meetings":
+                if args.action == "watch":
+                    watch_meetings(token)
+                    return
+                options = {}
+                if args.action == "record" and args.title and args.title.strip():
+                    options["title"] = normalize_meeting_title(args.title)
+                value = control(root, token, "meeting-" + args.action, **options)
+            elif args.command == "dictation":
+                # An older desktop must reject these actions instead of treating print
+                # as an ordinary stop that can insert into the focused application.
+                action = "dictation-stop-print" if args.print_transcript else f"dictation-{args.action}-raw" if args.raw else args.action
+                value = control(root, token, action, timeout=70 if args.print_transcript else 12)
+                if args.print_transcript:
+                    if value.get("status") == "no-speech":
+                        no_speech(args.json)
+                    if not args.json:
+                        print(value["text"])
+                        return
+            else:
+                value = control(root, token, "setup" if args.command == "setup" else args.action)
+        print(json.dumps(value, ensure_ascii=False))
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except ManagedFeatureError as error:
+        print(json.dumps({"code": "managed", "error": str(error)}) if args.json else str(error), file=sys.stderr)
+        raise SystemExit(1) from None
+    except ModelUnavailable as error:
+        print(json.dumps({"code": "model-unavailable", "error": str(error)}) if args.json else str(error), file=sys.stderr)
+        raise SystemExit(1) from None
+    except (ValueError, OSError, RuntimeError, httpx.HTTPError, MissingSession, sqlite3.Error, subprocess.TimeoutExpired) as error:
+        subject = "annotation" if args.command in ("annotate", "capture") else "meeting"
+        message = (f"{subject.capitalize()} not found." if isinstance(error, MissingSession) else
+                   f"The saved {subject} library is unavailable." if isinstance(error, sqlite3.Error) else str(error))
+        if args.json:
+            print(json.dumps({"error": message}, ensure_ascii=False), file=sys.stderr)
+        else:
+            print(message, file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -26,7 +26,7 @@ Use your voice to reply to email, share an update in Slack, prompt Claude, or st
 
 ![Jaro dictation demo. Hold Right Option ⌥ and speak, then release to insert text at the cursor in email, Slack, Claude, and Google Docs.](docs/media/dictation-demo.gif)
 
-1. Open **Settings → System Dictation** and allow **Microphone** and **Accessibility** access.
+1. Open **Settings → Dictation** and allow **Microphone** and **Accessibility** access.
 2. With Jaro running, click where you want the text to go. Hold **Right Option** and speak.
 3. Release **Right Option**. Jaro inserts the text at your cursor.
 
@@ -39,6 +39,10 @@ Open the DMG, drag the app to **Applications**, and open it. First launch downlo
 Allow microphone or Mac audio access when you first record from those sources. The app is signed by Jard, and macOS may require first-launch approval.
 
 To use the same session library in your browser, choose **File → Open in Browser**.
+
+## Develop and contribute
+
+The [documentation index](docs/README.md) has the user guides, SDK, and build instructions. See [Contributing](CONTRIBUTING.md) for the source layout and checks, the [Roadmap](ROADMAP.md) for current work, or [Security](SECURITY.md) to report a vulnerability.
 
 ## Why we made it
 

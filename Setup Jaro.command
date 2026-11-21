@@ -21,6 +21,6 @@ done
 uv sync --locked --python 3.13
 bun install --frozen-lockfile
 JARD_WELCOME_PAGE="$(pwd -P)/README.html" bun run build
-.venv/bin/python server.py --setup-model
-.venv/bin/python -c "from local_qwen import setup; setup()"
+.venv/bin/python engine/server.py --setup-model
+PYTHONPATH=engine .venv/bin/python -c "from local_qwen import setup; setup()"
 echo "Ready. Open Start Jaro.command."

@@ -7,14 +7,15 @@ export type SpeakerActivity = {
 }
 
 const colors = ["#8977cb", "#449587", "#cd8558", "#5b95c3", "#c47092", "#809447", "#ac8065", "#837eac"]
+export const meetingSpeakerNames = { 1: "You", 2: "Them" }
 
 export function speakerColor(speaker: number) {
   return colors[(speaker - 1) % colors.length]
 }
 
 // Nemotron channels are numbered in order of first appearance.
-export function speakerLabel(speaker: number) {
-  return `Speaker ${String.fromCharCode(64 + speaker)}`
+export function speakerLabel(speaker: number, names?: Record<number, string>) {
+  return names?.[speaker] ?? `Speaker ${String.fromCharCode(64 + speaker)}`
 }
 
 export function clock(seconds: number) {

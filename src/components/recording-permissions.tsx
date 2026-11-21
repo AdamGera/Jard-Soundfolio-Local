@@ -1,3 +1,4 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useEffect, useRef, useState } from "react"
 import { AudioLines, Check, Mic } from "lucide-react"
 import { Dialog } from "radix-ui"
@@ -30,6 +31,7 @@ type ControlsProps = AccessProps & {
 }
 
 function AccessControls({ native, mode, access, refusedSource, view, starting = false, onClose, onRetry }: ControlsProps) {
+  const { t } = useInterfaceLanguage()
   const { permissions, check: read } = access
   const settings = view === "settings"
   const sources = captureSources(mode)
@@ -96,17 +98,17 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
         <Icon aria-hidden="true" /><div><strong>{names[source]}</strong>
           <small>{source === "mic" ? "Your voice from the selected input" : "Sound from calls and other apps"}</small></div>
         <div className="recording-access-action">
-          {allowed ? <span className="recording-access-allowed"><Check aria-hidden="true" />Allowed</span> : <small>{statusLabel}</small>}
+          {allowed ? <span className="recording-access-allowed"><Check aria-hidden="true" />{t("Allowed")}</span> : <small>{statusLabel}</small>}
           {!allowed && !needsSettings && <Button variant="outline" size="sm" disabled={busy}
             onClick={() => void request(source)}>{source === "system" ? "Verify Mac audio access" : "Request access"}</Button>}
           {(settings || needsSettings) && <Button variant="outline" size="sm" disabled={busy}
-            aria-label={"Open " + panes[source] + " settings"} onClick={() => openSettings(source)}>Open Settings</Button>}
+            aria-label={"Open " + panes[source] + " settings"} onClick={() => openSettings(source)}>{t("Open Settings")}</Button>}
         </div>
       </div>
     })}</div>
     {(settings || !granted || refusedSource) && <details className="recording-access-help">
       <summary>Jard isn’t listed in System Settings</summary>
-      <p>Open Jaro.app from Finder and press Record to register its request. If macOS asks you to quit and reopen Jaro, do that before checking again.</p>
+      <p>Open Jaro from Finder and press Record to register its request. If macOS asks you to quit and reopen Jaro, do that before checking again.</p>
       {sources.includes("mic") && <p>Under Privacy &amp; Security → Microphone, macOS lists apps after they request access. Turn on Jaro. A restricted Mac may need an administrator.</p>}
       {permissions.mic === "denied" && <div className="recording-access-reset">
         <p>If Jard is still missing from Microphone after reopening, copy this command, quit Jard, then run it in Terminal. It clears only Jard’s microphone decision. Reopen Jard and press Record for a fresh macOS prompt.</p>
@@ -117,7 +119,7 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
       </div>}
       {sources.includes("system") && <><p>Under Privacy &amp; Security → Screen &amp; System Audio Recording, turn on Jard. If it is missing, use the add (+) button when available and select the app shown in Finder.</p>
         <div className="recording-access-links">
-          <button type="button" disabled={busy} onClick={() => void native.request("revealApp").catch(() => setMessage("Locate Jaro.app in Finder."))}>Show this app in Finder</button>
+          <button type="button" disabled={busy} onClick={() => void native.request("revealApp").catch(() => setMessage("Locate Jaro in Finder."))}>Show this app in Finder</button>
           {(permissions.system === "denied" || refusedSource === "system") && <button type="button" disabled={busy} onClick={() => void request("system")}>Request Mac audio access again</button>}
         </div></>}
     </details>}
@@ -147,7 +149,7 @@ function AccessControls({ native, mode, access, refusedSource, view, starting = 
           "macOS refused " + (refusedSource === "system" ? "Mac audio capture" : "microphone capture") + ". Check Jaro in Privacy & Security, then retry." :
           (inspection ? "Check macOS access for your selected audio sources." : "Check access for the audio sources you selected.")}</Dialog.Description>
         {controls}
-        <div className="recording-access-footer"><Button ref={cancel} variant="ghost" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
+        <div className="recording-access-footer"><Button ref={cancel} variant="ghost" size="sm" disabled={busy} onClick={onClose}>{t("Cancel")}</Button>
           <Button size="sm" disabled={busy} onClick={() => granted ? (inspection ? onClose?.() : onRetry?.()) : void check()}>{granted ? (inspection ? "Done" : "Retry recording") : "Check access again"}</Button></div>
       </Dialog.Content>
     </Dialog.Portal>

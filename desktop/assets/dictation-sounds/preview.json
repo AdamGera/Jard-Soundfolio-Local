@@ -1,0 +1,62 @@
+{
+  "fps": 60,
+  "columns": 12,
+  "width": 142,
+  "height": 50,
+  "scale": 2,
+  "previews": [
+    {
+      "cue": "sample",
+      "frames": 174,
+      "beats": [
+        { "frame": 0, "cue": "start" },
+        { "frame": 84, "cue": "stop" },
+        { "frame": 126, "cue": "done" },
+        { "frame": 132, "cue": "leave" }
+      ]
+    },
+    {
+      "cue": "start",
+      "frames": 81,
+      "beats": [
+        { "frame": 0, "cue": "start" },
+        { "frame": 54, "cue": "leave" }
+      ]
+    },
+    {
+      "cue": "stop",
+      "frames": 81,
+      "beats": [
+        { "frame": -48, "cue": "start" },
+        { "frame": 0, "cue": "stop" },
+        { "frame": 54, "cue": "leave" }
+      ]
+    },
+    {
+      "cue": "done",
+      "frames": 54,
+      "beats": [
+        { "frame": -72, "cue": "start" },
+        { "frame": -36, "cue": "stop" },
+        { "frame": 0, "cue": "done" },
+        { "frame": 6, "cue": "leave" }
+      ]
+    },
+    {
+      "cue": "error",
+      "frames": 60,
+      "beats": [
+        { "frame": -72, "cue": "start" },
+        { "frame": -36, "cue": "stop" },
+        { "frame": 0, "cue": "error" },
+        { "frame": 36, "cue": "leave" }
+      ]
+    }
+  ],
+  "stillFrames": [
+    { "cue": "start", "frame": 42 },
+    { "cue": "stop", "frame": 36 },
+    { "cue": "done", "frame": 16 },
+    { "cue": "error", "frame": 20 }
+  ]
+}

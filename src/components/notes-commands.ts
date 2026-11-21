@@ -4,7 +4,8 @@ import Suggestion, { exitSuggestion, type SuggestionProps } from "@tiptap/sugges
 export const NOTES_COMMAND_EVENT = "soundfolio-notes-command"
 
 function requestAction(editor: Editor, action: "dictate" | "link") {
-  editor.view.dom.dispatchEvent(new CustomEvent(NOTES_COMMAND_EVENT, { detail: action }))
+  if (editor.isDestroyed) return
+  editor.view.dom.dispatchEvent(new CustomEvent(NOTES_COMMAND_EVENT, { detail: action, bubbles: true }))
 }
 
 const commands = [
@@ -46,7 +47,7 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
       items: ({ query, editor }) => commands.filter(item =>
         (item.label !== "Link" || this.options.link) &&
         (item.label !== "Checklist" || this.options.checklist) &&
-        (item.label !== "Dictate" || editor.view.dom.closest('[data-can-dictate="true"]')) &&
+        (item.label !== "Dictate" || (!editor.isDestroyed && editor.view.dom.closest('[data-can-dictate="true"]'))) &&
         (item.label.toLowerCase() + " " + item.search).includes(query.trim().toLowerCase())),
       command: ({ editor, range, props }) => {
         editor.chain().focus().deleteRange(range).run()
@@ -59,6 +60,7 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
         list.setAttribute("role", "listbox")
         list.setAttribute("aria-label", "Insert in My notes")
         let current: SuggestionProps<Command, Command> | undefined
+        let field: HTMLElement | undefined
         let unmount: (() => void) | undefined
         let selected = 0
 
@@ -68,7 +70,7 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
             item.setAttribute("aria-selected", String(position === selected))
           }
           const item = list.children[selected]
-          if (item?.id) current?.editor.view.dom.setAttribute("aria-activedescendant", item.id)
+          if (item?.id) field?.setAttribute("aria-activedescendant", item.id)
         }
 
         function update(props: SuggestionProps<Command, Command>) {
@@ -94,7 +96,7 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
             empty.className = "notes-command-empty"
             empty.textContent = "No matching commands"
             list.append(empty)
-            props.editor.view.dom.removeAttribute("aria-activedescendant")
+            field?.removeAttribute("aria-activedescendant")
             return
           }
           highlight(0)
@@ -102,8 +104,10 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
 
         return {
           onStart(props) {
+            if (props.editor.isDestroyed) return
+            field = props.editor.view.dom
             update(props)
-            props.editor.view.dom.setAttribute("aria-controls", list.id)
+            field.setAttribute("aria-controls", list.id)
             unmount = props.mount(list)
           },
           onUpdate: update,
@@ -120,10 +124,12 @@ export const NotesCommands = Extension.create<{ link: boolean; checklist: boolea
             }
             return false
           },
-          onExit({ editor }) {
-            editor.view.dom.removeAttribute("aria-activedescendant")
-            editor.view.dom.removeAttribute("aria-controls")
+          onExit() {
+            field?.removeAttribute("aria-activedescendant")
+            field?.removeAttribute("aria-controls")
             unmount?.()
+            unmount = undefined
+            field = undefined
             current = undefined
           },
         }

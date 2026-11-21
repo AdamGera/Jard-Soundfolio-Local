@@ -31,6 +31,7 @@ __pycache__/
 /desktop/.native/
 /desktop/.zig-cache/
 /desktop/zig-out/
+/desktop/transforms/target/
 /desktop/out/
 
 # Local configuration, engine state, and private recording libraries
@@ -66,6 +67,7 @@ sessions.sql.*
 /sessions/
 /staging/
 *.wav
+!/desktop/assets/dictation-sounds/**/*.wav
 *.m4a
 *.mp3
 *.webm

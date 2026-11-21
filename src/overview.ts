@@ -53,7 +53,7 @@ function parseDraft(data: string, target: string): Draft | null {
   } catch { return null }
 }
 
-export function useOverview(id?: string, initial?: Overview | null, visible = false) {
+export function useOverview(id?: string, initial?: Overview | null, visible = false, paused = false) {
   const [value, setValue] = useState(initial)
   const [refreshCount, refresh] = useState(0)
   const [preview, setPreview] = useState<{ target: string; draft: Draft } | null>(null)
@@ -66,7 +66,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
   const status = value?.status
   const target = value?.target
   useEffect(() => {
-    if (!id || requesting) return
+    if (!id || requesting || paused) return
     let reading: AbortController | undefined
     let stream: EventSource | undefined
     let timer = 0
@@ -129,7 +129,7 @@ export function useOverview(id?: string, initial?: Overview | null, visible = fa
       window.clearTimeout(timer)
       cancelAnimationFrame(frame)
     }
-  }, [id, url, requesting, status, target, visible, refreshCount])
+  }, [id, url, requesting, status, target, visible, refreshCount, paused])
 
   const select = useCallback((language: string, retry = false, regenerate: WritingTab | false = false, updatePersonal = false) => {
     setPreview(null)

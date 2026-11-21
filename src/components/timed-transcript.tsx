@@ -69,7 +69,8 @@ export const TimedTranscript = memo(function TimedTranscript({
     const turnIndex = Math.max(0, turns.findLastIndex(turn => turn.start <= citation.seconds))
     const target = nearest >= 0 ? elements.current[nearest] :
       root.current?.querySelector<HTMLElement>(`[data-turn="${turnIndex}"]`)
-    target?.focus({ preventScroll: true })
+    const focus = target instanceof HTMLButtonElement && target.disabled ? target.closest<HTMLElement>("[data-turn]") : target
+    focus?.focus({ preventScroll: true })
     if (target) reveal(target, true)
   }, [citation, words, turns])
 
@@ -106,7 +107,7 @@ export const TimedTranscript = memo(function TimedTranscript({
         return pieces
       }
       let first = true
-      const label = turn.speaker ? speakerLabel(turn.speaker) : undefined
+      const label = turn.speaker ? speakerLabel(turn.speaker, result.speakerNames) : undefined
       return <article className="speaker-turn" data-turn={turnIndex} key={turnIndex} tabIndex={-1}
         data-side={turn.speaker && turn.speaker % 2 === 0 ? "end" : "start"}
         style={turn.speaker ? { "--speaker-color": speakerColor(turn.speaker) } as CSSProperties : undefined}>
@@ -137,7 +138,7 @@ export const TimedTranscript = memo(function TimedTranscript({
         </p>)}
       </article>
     })
-  }, [turns, matches, ready, seek, words])
+  }, [turns, matches, ready, seek, words, result.speakerNames])
 
   return <div ref={root} tabIndex={-1} className="transcript-text speaker-transcript">{content}</div>
 })

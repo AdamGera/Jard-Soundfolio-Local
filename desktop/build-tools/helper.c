@@ -11,7 +11,8 @@ int main(int argc, char **argv) {
     char executable[PATH_MAX], resolved[PATH_MAX], python[PATH_MAX], script[PATH_MAX];
     uint32_t size = sizeof(executable);
     if (_NSGetExecutablePath(executable, &size) || !realpath(executable, resolved)) return 1;
-    const int is_client = !strcmp(basename(argv[0]), "jard-ui");
+    const char *name = basename(argv[0]);
+    const char *mode = !strcmp(name, "jard-ui") ? "ui" : !strcmp(name, "jardctl") ? "control" : "engine";
     const char *helpers = dirname(resolved);
     if (snprintf(python, sizeof(python), "%s/../Resources/PythonRuntime/bin/python3.13", helpers) >= sizeof(python) ||
         snprintf(script, sizeof(script), "%s/../Resources/engine/desktop/build-tools/helper.py", helpers) >= sizeof(script)) return 1;
@@ -20,7 +21,7 @@ int main(int argc, char **argv) {
     args[0] = python;
     args[1] = "-EsBu";
     args[2] = script;
-    args[3] = is_client ? "ui" : "engine";
+    args[3] = (char *)mode;
     for (int n = 1; n < argc; n++) args[n + 3] = argv[n];
     execv(python, args);
     perror("Jaro runtime");

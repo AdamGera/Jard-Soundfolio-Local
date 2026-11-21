@@ -30,7 +30,7 @@ import wave
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "engine"))
 
 
 def seed(root, playback=False):
@@ -51,7 +51,12 @@ def seed(root, playback=False):
             file.writeframes(bytes(96 * 32000))
     options = dict(recording=True, live=True, diarization=True, languageHints=["en"], model="fixture",
                    modelRevision="fixture", speakerModel="fixture", speakerModelRevision="fixture")
-    key, _ = store.create(audio, "Design review", "audio/wav", options, 96)
+    tracks = None
+    if playback:
+        tracks = {track: root / f"{track}.wav" for track in ("mic", "system")}
+        for path in tracks.values():
+            shutil.copyfile(audio, path)
+    key, _ = store.create(audio, "Design review", "audio/wav", options, 96, tracks=tracks)
     lines = [(1,0,17,"Let’s start with the listening test. People could hear both speakers clearly while wearing headphones."),
              (2,17,35,"The microphone meter helped me check my input before recording. I would keep both meters visible."),
              (1,35,55,"For the next build we will keep the source selector beside Record. The session library and exports stay where they are."),

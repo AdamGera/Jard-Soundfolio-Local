@@ -11,11 +11,24 @@ import UniformTypeIdentifiers
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        // Retention needs Foundation only and must not activate Jard or Finder.
+        if args.first == "trash", args.count == 2 {
+            do {
+                var destination: NSURL?
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: args[1]), resultingItemURL: &destination)
+                send(["path": destination?.path as Any? ?? NSNull()])
+            } catch {
+                send(["error": error.localizedDescription])
+                exit(1)
+            }
+            return
+        }
         guard let command = args.first,
               (["open-audio", "open-models"].contains(command) && args.count == 1)
+              || (command == "meeting-export-folder" && args.count == 2)
               || (command == "save" && args.count == 2)
               || (command == "confirm" && args.count == 3) else {
-            send(["error": "Use open-audio, open-models, save <name>, or confirm <title> <message>."])
+            send(["error": "Use open-audio, open-models, meeting-export-folder <folder>, save <name>, or confirm <title> <message>."])
             exit(2)
         }
         let app = NSApplication.shared
@@ -41,11 +54,19 @@ import UniformTypeIdentifiers
             send(["path": result])
         default:
             let panel = NSOpenPanel()
-            let folder = command == "open-models"
+            let exports = command == "meeting-export-folder"
+            let folder = exports || command == "open-models"
             panel.canChooseFiles = !folder
             panel.canChooseDirectories = folder
             panel.allowsMultipleSelection = false
-            panel.title = folder ? "Choose the Jard model folder" : "Open audio"
+            panel.title = exports ? "Choose a meeting export folder" : folder ? "Choose the Jard model folder" : "Open audio"
+            if exports {
+                panel.canCreateDirectories = true
+                panel.prompt = "Choose"
+                panel.directoryURL = args[1].isEmpty
+                    ? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                    : URL(fileURLWithPath: args[1], isDirectory: true)
+            }
             if !folder {
                 // Use the formats supported by the backend FFmpeg decoder.
                 let extensions = ["aac", "aif", "aiff", "flac", "m4a", "m4b", "mka", "mkv", "mov",

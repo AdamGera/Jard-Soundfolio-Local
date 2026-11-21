@@ -9,4 +9,4 @@ fi
 if [[ $# -eq 0 ]]; then
   set -- --background
 fi
-exec .venv/bin/python server.py "$@"
+exec .venv/bin/python engine/server.py "$@"

@@ -1,9 +1,10 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useRef, useState } from "react"
 import { Dialog } from "radix-ui"
 import { Combobox } from "@base-ui/react/combobox"
 import { Check, ChevronDown, Globe2, Search } from "lucide-react"
-import catalog from "../../overview_languages.json"
-import autonyms from "../../overview_autonyms.json"
+import catalog from "../../engine/overview_languages.json"
+import autonyms from "../../engine/overview_autonyms.json"
 import { Button } from "./ui/button"
 
 const nativeNames: Record<string, string> = autonyms
@@ -17,6 +18,7 @@ type Item = typeof auto
 export function OverviewLanguage({ value, detected, disabled, onSelect }: {
   value: string; detected: string; disabled?: boolean; onSelect: (code: string) => void
 }) {
+  const { t } = useInterfaceLanguage()
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState<Item | null>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -56,7 +58,7 @@ export function OverviewLanguage({ value, detected, disabled, onSelect }: {
             Jaro will open the saved overview and timeline in this language, or generate them locally if needed.
           </Dialog.Description>
           <div className="note-language-actions">
-            <Dialog.Close asChild><Button ref={cancel} size="sm" variant="outline">Cancel</Button></Dialog.Close>
+            <Dialog.Close asChild><Button ref={cancel} size="sm" variant="outline">{t("Cancel")}</Button></Dialog.Close>
             <Button size="sm" onClick={() => {
               if (pending) onSelect(pending.code)
               setPending(null)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build (or repackage) Jaro using only pinned inputs and macOS build tools."""
 import argparse
+from base64 import b64decode
 import hashlib
 import json
 import os
@@ -10,10 +11,12 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+from urllib.parse import urlsplit
 
 TOOLS = Path(__file__).resolve().parent
 DESKTOP = TOOLS.parent
 REPO = DESKTOP.parent
+ENGINE = REPO / "engine"
 CACHE = DESKTOP / ".build"
 OUT = DESKTOP / "out"
 PUBLISHER = Path.home() / ".config/jard/soundfolio-local/macos-publisher"
@@ -47,19 +50,57 @@ def prepare_sdk():
     os.environ["NATIVE_SDK_PATH"] = str(sdk)
 
 
+def prepare_transform_runtime():
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise SystemExit("Install Rust 1.97 and Cargo to build the transformation runtime.")
+    manifest = DESKTOP / "transforms/Cargo.toml"
+    target = "aarch64-apple-darwin"
+    build = CACHE / "transform-target"
+    env = {**os.environ, "MACOSX_DEPLOYMENT_TARGET": "26.0", "CARGO_TARGET_DIR": str(build)}
+    subprocess.run([cargo, "build", "--release", "--locked", "--manifest-path", manifest, "--target", target],
+                   check=True, cwd=REPO, env=env)
+    metadata = subprocess.check_output([cargo, "metadata", "--format-version", "1", "--locked",
+                                        "--manifest-path", manifest, "--filter-platform", target], cwd=REPO, env=env)
+    crates = [package for package in json.loads(metadata)["packages"] if package["source"]]
+    return build / target / "release/jaro-transforms", crates
+
+
+def copy_transform_licenses(crates, directory):
+    directory.mkdir()
+    for package in crates:
+        root = Path(package["manifest_path"]).parent
+        paths = {path for path in root.iterdir() if path.is_file() and
+                 path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "COPYRIGHT"))}
+        if package["license_file"]:
+            paths.add(root / package["license_file"])
+        if package["name"] == "rquickjs-sys":
+            paths.add(root / "quickjs/LICENSE")
+        package_name = f'{package["name"]}-{package["version"]}'
+        license_type = package["license"] or "(see license file)"
+        (directory / f"{package_name}.txt").write_text(
+            f"{package_name}  {license_type}\n" +
+            "".join(f"\n{item.relative_to(root)}\n{item.read_text(errors='replace')}\n" for item in sorted(paths)),
+            encoding="utf-8",
+        )
+
+
 def copy_engine(resources):
     target = resources / "engine"
     target.mkdir()
     # Only ship engine source and catalogs, even if a checkout holds private files.
     for name in (
-        "audio_file.py", "chat_context.py", "diarization.py", "engine_lifecycle.py",
-        "insights.py", "local_qwen.py", "native_recordings.py", "note_stream.py", "overview_exchanges.py", "place_hints.py",
-        "personal_notes.py", "rumble_model.py", "server.py", "session_notes.py", "session_store.py",
-        "speaker_alignment.py", "title_words.py", "writing_api.py", "writing_cache.py",
+        "audio_file.py", "chat_context.py", "diarization.py", "diagnostics.py", "engine_lifecycle.py", "engine_paths.py",
+        "insights.py", "local_qwen.py", "meeting_transcript.py", "model_installation.py", "native_recordings.py", "note_stream.py", "overview_exchanges.py", "place_hints.py",
+        "personal_notes.py", "rumble_model.py", "annotation_assets.py", "annotation_deliveries.py", "annotation_routing.py",
+        "annotation_rollback.py", "saved_annotations.py", "dictation_output.py", "dictation_settings.py", "output_transform_catalog.py", "output_transform_network.py", "output_transform_policy.py", "output_transform_operations.py", "output_transform_runtime.py", "output_transform_workspace.py", "jardctl.py", "server.py", "session_notes.py", "session_store.py",
+        "meeting_mcp.py", "meeting_brief.py", "meeting_exports.py", "meeting_retention.py", "meeting_rolling.py", "meeting_search.py", "saved_dictations.py", "saved_meetings.py",
+        "managed_preferences.py", "sdk_discovery.py", "sdk_embedded.py", "speaker_alignment.py", "transcription_pieces.py", "title_words.py", "writing_api.py", "writing_cache.py",
         "overview_autonyms.json", "overview_languages.json", "place_names.json",
     ):
-        shutil.copy2(REPO / name, target)
+        shutil.copy2(ENGINE / name, target)
     shutil.copytree(REPO / "dist", target / "dist")
+    shutil.copytree(DESKTOP / "transforms" / "starter", target / "transform-starter")
     shutil.copytree(REPO / "licenses", resources / "licenses")
     for name in ("LICENSE", "NOTICE"):
         shutil.copy2(REPO / name, resources / "licenses" / name)
@@ -74,40 +115,82 @@ def copy_engine(resources):
     shutil.copy2(TOOLS / "build-codecs.sh", resources / "licenses")
     shutil.copy2(Path(os.environ["NATIVE_SDK_PATH"]) / "LICENSE", resources / "licenses/Native-SDK-LICENSE")
     (target / "desktop/build-tools").mkdir(parents=True)
-    shutil.copy2(DESKTOP / "mac_bridge.py", target / "desktop/mac_bridge.py")
+    for name in ("mac_bridge.py", "sdk_capture.py", "annotation_automation.py"):
+        shutil.copy2(DESKTOP / name, target / "desktop" / name)
     for name in ("helper.py", "model_setup.py", "models.json"):
         shutil.copy2(TOOLS / name, target / "desktop/build-tools")
 
 
-def assemble(app):
+def update_configuration(channel, development):
+    stable = json.loads((DESKTOP / "app.json").read_bytes())["updates"]
+    updates = {**stable, "channel": channel}
+    if development is None:
+        if channel == "dev":
+            raise ValueError("A Development build needs --dev-updates with its signed feed configuration.")
+        return updates
+    dev = json.loads(development.expanduser().read_bytes())
+    if not isinstance(dev, dict):
+        raise ValueError("Provide a JSON object with feed_url, public_key, and an optional release_url.")
+    for key in ("feed_url", "release_url"):
+        if key == "release_url" and key not in dev:
+            continue
+        address = dev.get(key)
+        url = urlsplit(address) if isinstance(address, str) and address else None
+        if not url or url.scheme != "https" or not url.hostname or url.username is not None or url.password is not None:
+            raise ValueError(f"Development {key} must be an HTTPS URL.")
+    try:
+        key = b64decode(dev.get("public_key", ""), validate=True)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Development public_key must be Base64 for a 32-byte Ed25519 public key.") from error
+    if len(key) != 32 or key == b64decode(stable["public_key"]) or dev["feed_url"] == stable["feed_url"]:
+        raise ValueError("Development needs its own feed URL and a distinct 32-byte Ed25519 public key.")
+    updates["development"] = {field: dev[field] for field in ("feed_url", "public_key", "release_url") if field in dev}
+    return updates
+
+
+def assemble(app, updates, transforms):
     contents = app / "Contents"
     info_file = contents / "Info.plist"
     with info_file.open("rb") as data:
         info = plistlib.load(data)
     info.update({
-        "JardUpdates": json.loads((DESKTOP / "app.json").read_bytes())["updates"],
+        "JardUpdates": updates,
+        "JardOfflineSettingsProtocol": 1,
         "LSMinimumSystemVersion": "26.0",
         "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
         "NSHumanReadableCopyright": "Copyright © 2026 Jard (Joint AI Research & Dynamics)",
-        "NSMicrophoneUsageDescription": "Record your voice together with call audio when you choose Record.",
-        "NSScreenCaptureUsageDescription": "Capture the audio from your Mac for call recordings, including when using headphones.",
+        "NSMicrophoneUsageDescription": "Record your voice for dictation or when you choose to record a session.",
+        "NSCameraUsageDescription": "Mirror and record the screen of the iPhone or iPad you connect by USB for an annotation.",
+        "NSScreenCaptureUsageDescription": "Record the display you select for an annotation or capture Mac audio for a call.",
         "NSAudioCaptureUsageDescription": "Include the sound from calls and other apps in the recording.",
+        "NSCalendarsFullAccessUsageDescription": "Show upcoming meetings and let you join or record them from reminders. Jard only reads calendar events.",
+        "NSAppleEventsUsageDescription": "Pause and resume media or read the active browser tab for website profiles when you allow access in Dictation settings.",
     })
     with info_file.open("wb") as data:
         plistlib.dump(info, data)
     resources = contents / "Resources"
     resources.mkdir(exist_ok=True)
     copy_engine(resources)
+    transform_executable, transform_crates = transforms
+    copy_transform_licenses(transform_crates, resources / "licenses/Transformation Runtime")
+    sdk = resources / "sdk" / "typescript"
+    sdk.mkdir(parents=True)
+    for name in ("index.mjs", "index.d.mts", "README.md"):
+        shutil.copy2(REPO / "sdk" / "typescript" / name, sdk / name)
     shutil.copy2(DESKTOP / "setup.html", resources / "setup.html")
+    shutil.copy2(DESKTOP / "interface-languages.json", resources / "interface-languages.json")
+    shutil.copytree(DESKTOP / "assets/dictation-sounds", resources / "dictation-sounds")
     runtime = contents / "Resources/PythonRuntime"
     shutil.copytree(CACHE / "python", runtime, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     helpers = contents / "Helpers"
     helpers.mkdir(exist_ok=True)
+    shutil.copy2(transform_executable, helpers / "jaro-transforms")
     run("xcrun", "clang", "-O2", "-arch", "arm64", "-mmacosx-version-min=26", TOOLS / "helper.c", "-o", helpers / "jard-engine")
     shutil.copy2(helpers / "jard-engine", helpers / "jard-ui")
+    shutil.copy2(helpers / "jard-engine", helpers / "jardctl")
     swift = ["xcrun", "swiftc", "-O", "-parse-as-library", "-swift-version", "5", "-target", "arm64-apple-macos26.0"]
     capture = DESKTOP / "capture"
-    run(*swift, *(capture / n for n in ("CLI.swift", "Capture.swift", "Recording.swift")), "-o", helpers / "jard-capture")
+    run(*swift, *(capture / n for n in ("CLI.swift", "Capture.swift", "Recording.swift", "WarmMicrophone.swift", "MeetingSystemAudio.swift")), "-o", helpers / "jard-capture")
     run(*swift, capture / "JardDialogs.swift", "-o", helpers / "jard-dialog")
     for name in ("ffmpeg", "ffprobe"):
         shutil.copy2(CACHE / "ffmpeg-7.1.1" / name, helpers)
@@ -128,7 +211,7 @@ def sign(app, identity):
         if path != main_executable and is_mach(path):
             args = ["--entitlements", TOOLS / "capture.entitlements"] if path.name == "jard-capture" else []
             run(*flags, *args, path)
-    run(*flags, "--entitlements", TOOLS / "capture.entitlements", app)
+    run(*flags, "--entitlements", TOOLS / "host.entitlements", app)
     run("codesign", "--verify", "--deep", "--strict", app)
 
 
@@ -150,7 +233,7 @@ def sign_with_publisher(app, directory, *, release=False):
 
     entitlements = TOOLS / "capture.entitlements"
     run(signer, "sign", "--pem-file", key, "--pem-file", certificate, "--timestamp-url", "none",
-        "--entitlements-xml-file", entitlements,
+        "--entitlements-xml-file", TOOLS / "host.entitlements",
         "--entitlements-xml-file", f"Contents/Helpers/jard-capture:{entitlements}", app)
     run("codesign", "--verify", "--deep", "--strict", app)
     # Check the actual signer of both processes involved in recording access.
@@ -184,8 +267,14 @@ def main():
     parser.add_argument("--notary-profile", help="Keychain notarytool profile for publishing")
     parser.add_argument("--dmg", action="store_true")
     parser.add_argument("--update-key", type=Path, help="Sign an installable update ZIP and feed with an external Ed25519 seed")
+    parser.add_argument("--channel", choices=("stable", "dev"), default="stable", help="Release channel stamped into the signed app")
+    parser.add_argument("--dev-updates", type=Path, help="JSON with the Development feed URL and distinct public key")
     parser.add_argument("--notes", default="", help="Release notes shown in the native update prompt")
     opts = parser.parse_args()
+    try:
+        updates = update_configuration(opts.channel, opts.dev_updates)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     if opts.identity is None and opts.publisher_identity is None and (PUBLISHER.exists() or opts.update_key):
         opts.publisher_identity = PUBLISHER
     if opts.update_key and opts.identity == "-":
@@ -205,6 +294,7 @@ def main():
     run(TOOLS / "prepare-runtime.sh")
     run("bun", "install", "--frozen-lockfile")
     run("bun", "run", "build")
+    transforms = prepare_transform_runtime()
     if not opts.reuse_shell:
         run(TOOLS / "build-shell.sh")
     # Build entirely in staging so a compile or signing failure preserves the previous app.
@@ -212,7 +302,7 @@ def main():
         stage = Path(stage)
         app = stage / "Jaro.app"
         run("native", "package", "--target", "macos", "--signing", "none", "--binary", DESKTOP / "zig-out/bin/jard-soundfolio-local", "--output", app, cwd=DESKTOP)
-        assemble(app)
+        assemble(app, updates, transforms)
         if opts.publisher_identity:
             sign_with_publisher(app, opts.publisher_identity.expanduser().resolve(), release=bool(opts.update_key))
         else:
@@ -225,15 +315,22 @@ def main():
             archive = stage / "Jaro-arm64.zip"
             # The installer expects exactly one top-level .app, including its symlinks and executable modes.
             run("ditto", "-c", "-k", "--norsrc", "--keepParent", app, archive)
-            url = f"https://github.com/AdamGera/Jaro/releases/download/v{version}/{archive.name}"
+            tag = f"dev-v{version}" if opts.channel == "dev" else f"v{version}"
+            url = f"https://github.com/AdamGera/Jaro/releases/download/{tag}/{archive.name}"
             feed = stage / "native-update.json"
-            run("native", "update", "sign", "--manifest", DESKTOP / "app.json",
+            release_manifest = DESKTOP / "app.json"
+            if opts.channel == "dev":
+                metadata = json.loads(release_manifest.read_bytes())
+                metadata["updates"] = {key: updates["development"][key] for key in ("feed_url", "public_key")}
+                release_manifest = stage / "release-manifest.json"
+                release_manifest.write_text(json.dumps(metadata))
+            run("native", "update", "sign", "--manifest", release_manifest,
                 "--target", "macos-aarch64", "--archive", archive, "--url", url,
                 "--notes", opts.notes, "--private-key", opts.update_key, "--output", feed)
         if opts.dmg or opts.notary_profile:
             image_root = stage / "image"
             image_root.mkdir()
-            image_app = image_root / "Jaro.app"
+            image_app = image_root / app.name
             app.rename(image_app)
             app = image_app
             (image_root / "Applications").symlink_to("/Applications")
@@ -244,7 +341,7 @@ def main():
             if opts.notary_profile:
                 notarize(image, opts.notary_profile)
             image.replace(OUT / image.name)
-        output = OUT / "Jaro.app"
+        output = OUT / app.name
         if output.exists():
             output.rename(stage / "previous.app")
         app.rename(output)

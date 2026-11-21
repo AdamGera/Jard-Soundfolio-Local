@@ -2,8 +2,8 @@
   "id": "local.jardaudio.desktop",
   "name": "jard-soundfolio-local",
   "display_name": "Jaro",
-  "description": "Your recordings, transcripts, and notes stay on your Mac.",
-  "version": "0.0.6",
+  "description": "Local dictation, meeting recordings, and transcripts on your Mac.",
+  "version": "0.0.7",
   "platforms": [
     "macos"
   ],

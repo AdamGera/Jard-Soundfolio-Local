@@ -33,9 +33,20 @@
 <script>
   const byId = id => document.getElementById(id);
   const title = byId("title"), detail = byId("detail"), choices = byId("choices"), retry = byId("retry"), progress = byId("progress");
+  let messages = {};
+  function copy(element, source) {
+    element.dataset.message = source;
+    element.textContent = Object.hasOwn(messages, source) ? messages[source] : source;
+  }
+  for (const element of [title, detail, retry, byId("download"), byId("folder")]) copy(element, element.textContent);
+  window.zero?.invoke("jard.interfaceLanguage", {action:"status"}).then(state => {
+    messages = state.messages ?? {};
+    document.documentElement.lang = state.resolved ?? "en";
+    for (const element of document.querySelectorAll("[data-message]")) copy(element, element.dataset.message);
+  }).catch(() => {});
   function choose() {
-    title.textContent = "Set up on this Mac";
-    detail.textContent = "Download 3.86 GB of speech and writing models once, or choose your existing Jard model folder. After setup, you can record and transcribe offline.";
+    copy(title, "Set up on this Mac");
+    copy(detail, "Download 3.86 GB of speech and writing models once, or choose your existing Jard model folder. After setup, you can record and transcribe offline.");
     choices.hidden = false;
     progress.hidden = true;
     retry.hidden = true;
@@ -47,15 +58,15 @@
       const state = await window.zero.invoke("jard." + command, args);
       if (!state?.ready) choose();
     } catch (error) {
-      title.textContent = "Couldn’t open the workspace";
-      detail.textContent = error.message;
+      copy(title, "Couldn’t open the workspace");
+      copy(detail, error.message);
       retry.hidden = false;
       progress.hidden = true;
     }
   }
   function install(source) {
-    title.textContent = "Preparing your models…";
-    detail.textContent = source === "folder" ? "Choose the folder containing your existing model files." : "Starting the download.";
+    copy(title, "Preparing your models…");
+    copy(detail, source === "folder" ? "Choose the folder containing your existing model files." : "Starting the download.");
     request("setup", {source});
   }
   window.addEventListener("native-sdk:setup", ({detail: info}) => {
@@ -63,6 +74,7 @@
     progress.hidden = false;
     progress.max = info.total;
     progress.value = info.completed;
+    delete detail.dataset.message;
     detail.textContent = Math.floor(info.completed / info.total * 100) + "% · " + info.file;
   });
   byId("download").onclick = () => install("download");

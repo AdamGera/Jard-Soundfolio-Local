@@ -1,0 +1,94 @@
+import { useEffect, useRef, useState } from "react"
+import { Power } from "lucide-react"
+import type { DesktopBridge, DesktopLoginAction, DesktopLoginItem } from "@/desktop"
+import { useInterfaceLanguage } from "@/interface-language"
+import { SettingRow } from "./settings-rows"
+import { Button } from "./ui/button"
+
+export function LaunchAtLogin({ native, onboarding = false }: { native: DesktopBridge; onboarding?: boolean }) {
+  const { t } = useInterfaceLanguage()
+  const [status, setStatus] = useState<DesktopLoginItem>()
+  const [requested, setRequested] = useState<boolean>()
+  const [actionError, setActionError] = useState("")
+  const revision = useRef(0)
+  const changing = useRef(false)
+  const mounted = useRef(false)
+
+  useEffect(() => {
+    mounted.current = true
+    let active = true
+    let reading = false
+    async function refresh() {
+      if (changing.current || reading || document.hidden) return
+      reading = true
+      const version = revision.current
+      try {
+        const result = await native.request("loginItem", { action: "status" })
+        if (active && version === revision.current) setStatus(result)
+      } catch {
+        if (active && version === revision.current) setStatus(previous => previous ?? { state: "unknown" })
+      } finally {
+        reading = false
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(refresh, 1500)
+    window.addEventListener("focus", refresh)
+    document.addEventListener("visibilitychange", refresh)
+    return () => {
+      active = mounted.current = false
+      window.clearInterval(timer)
+      window.removeEventListener("focus", refresh)
+      document.removeEventListener("visibilitychange", refresh)
+    }
+  }, [native])
+
+  async function change(action: DesktopLoginAction) {
+    const version = ++revision.current
+    changing.current = true
+    setRequested(action.action === "set" ? action.enabled : undefined)
+    setActionError("")
+    try {
+      const result = await native.request("loginItem", action)
+      if (mounted.current && version === revision.current) {
+        setStatus(result)
+        setActionError(result.message ?? "")
+      }
+    } catch (error) {
+      if (mounted.current && version === revision.current)
+        setActionError(error instanceof Error ? error.message : "macOS could not change Launch at Login.")
+    } finally {
+      if (mounted.current && version === revision.current) {
+        changing.current = false
+        setRequested(undefined)
+      }
+    }
+  }
+
+  const title = t(onboarding ? "Launch Jard at login" : "Launch at login")
+  const error = actionError || (status?.state === "unknown" ? status.message : undefined)
+  if (status?.state === "enabled" || status?.state === "disabled") {
+    const input = <input type="checkbox" role={onboarding ? undefined : "switch"} aria-label={title}
+      checked={requested ?? (status.state === "enabled")}
+      onChange={event => void change({ action: "set", enabled: event.target.checked })} />
+    if (onboarding) return <>
+      <label className="dictation-login">{input}{title}</label>
+      {error && <p className="dictation-error" role="alert">{t(error)}</p>}
+    </>
+    return <SettingRow icon={Power} title={title} detail={error && <span className="dictation-error" role="alert">{t(error)}</span>}>
+      {input}
+    </SettingRow>
+  }
+
+  const control = status?.state === "approval"
+    ? <Button type="button" size="sm" variant="outline" onClick={() => void change({ action: "openSettings" })}>
+      {t("Open Login Items")}
+    </Button>
+    : <span className="dictation-login-state" role="status">{t(status ? "Unavailable" : "Checking…")}</span>
+  const detail = error ? <span className="dictation-error" role="alert">{t(error)}</span>
+    : status?.state === "approval" ? t("Allow Jaro in System Settings.") : undefined
+  if (onboarding) return <div className="dictation-login">
+    <span>{title}{detail && <small className="dictation-login-detail">{detail}</small>}</span>{control}
+  </div>
+  return <SettingRow icon={Power} title={title} detail={detail} label={false}>{control}</SettingRow>
+}

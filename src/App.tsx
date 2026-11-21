@@ -1,11 +1,19 @@
+import { useInterfaceLanguage } from "@/interface-language"
 import { useEffect, useEffectEvent, useRef, useState, type ChangeEvent } from "react"
 import { ChevronDown, FolderOpen, Mic, Plus, Square, UsersRound } from "lucide-react"
 
 import { captureSources, desktopBridge, RECORDING_MODES, savedRecordingMode, type CaptureSource, type DesktopCaptureEvent, type RecordingDraft, type RecordingMode } from "./desktop"
 import { useRecordingAccess } from "./use-recording-access"
+import { DesktopAnnotationControls } from "@/components/desktop-annotation"
+import { DesktopMeetingControls } from "@/components/desktop-meetings"
+import { DesktopUpdateControl, DesktopUpdateFeedback, DesktopUpdateSettings } from "@/components/desktop-update"
+import { DesktopApplicationSettings } from "@/components/desktop-application-settings"
+import { useDesktopUpdate } from "@/desktop-update"
+import { useSystemDictation } from "./system-dictation"
+import { SystemDictationSettings, SystemDictationTour, SystemDictationWorkspace } from "@/components/system-dictation"
 import { RecordingAccessDialog, RecordingAccessSettings } from "@/components/recording-permissions"
-import { readSessionRoute, writeSessionRoute } from "./session-route"
-import { clock, speakerLabel } from "./speaker-activity"
+import { readSessionRoute, sessionTab, writeSessionRoute } from "./session-route"
+import { clock, meetingSpeakerNames, speakerLabel } from "./speaker-activity"
 import { QuitButton } from "@/components/quit-button"
 import { SessionLibrary } from "@/components/session-library"
 import { ResultsPanel } from "@/components/results-panel"
@@ -54,6 +62,7 @@ export default function App() {
 }
 
 function Workspace({ onQuit }: { onQuit: () => void }) {
+  const { t } = useInterfaceLanguage()
   const [dictating, setDictating] = useState(false)
   const [status, setStatus] = useState<ModelStatus>("loading")
   const [phase, setPhase] = useState<Phase>("idle")
@@ -71,7 +80,9 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const [elapsed, setElapsed] = useState(0)
   const [level, setLevel] = useState(0)
   const native = desktopBridge()
+  const desktopUpdate = useDesktopUpdate(native)
   const recordingAccess = useRecordingAccess(native)
+  const systemDictation = useSystemDictation(native)
   const [permissionGuide, setPermissionGuide] = useState<"inspection" | "record" | null>(null)
   const [refusedSource, setRefusedSource] = useState<CaptureSource | null>(null)
   const [mode, setMode] = useState<RecordingMode>(savedRecordingMode)
@@ -86,6 +97,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const [discarding, setDiscarding] = useState<string | null>(null)
   const nativeCapture = useRef(false)
   const nativeStopping = useRef(false)
+  const nativeMeeting = useRef(false)
+  const [meetingStopPending, setMeetingStopPending] = useState(false)
   const nativeSession = useRef<AbortController | null>(null)
   const deviceRevision = useRef(0)
   const liveRevision = useRef(0)
@@ -93,12 +106,14 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const [current, setCurrent] = useState<DownloadItem | null>(null)
   const [restoring, setRestoring] = useState(() => !!readSessionRoute().id)
+  const [jump, setJump] = useState<number>()
   const restoreRequest = useRef<AbortController | null>(null)
   const pendingNavigation = useRef(false)
   const session = useRef<Session | null>(null)
   const copyTimer = useRef<number>(undefined)
 
   useEffect(() => {
+    if (native) return
     const endpoint = `/api/clients/${crypto.randomUUID()}`
     let connection: EventSource | undefined
     const connect = () => {
@@ -117,7 +132,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       window.removeEventListener("pagehide", disconnect)
       disconnect()
     }
-  }, [])
+  }, [native])
 
   useEffect(() => {
     const abort = new AbortController()
@@ -158,14 +173,16 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const busy = phase === "starting" || phase === "transcribing"
   const canStart = status === "ready" && phase === "idle" && !restoring && !choosingFile && !dictating
   const preparingModel = status === "loading"
-  const processingSavedAudio = phase === "idle" && current?.saved?.status === "processing"
+  const waitingMeeting = current?.saved?.status === "interrupted" && !!current.saved.finalizationPending && !current.saved.meetingsManaged
+  const processingSavedAudio = phase === "idle" && (current?.saved?.status === "processing" || waitingMeeting)
   const working = busy || restoring || preparingModel || processingSavedAudio
 
-  function showSession(saved: SavedSession, wanted: string) {
-    const tab = saved.status === "complete" ? wanted : "transcript"
+  function showSession(saved: SavedSession, wanted: string, at?: number) {
+    const tab = sessionTab(saved, wanted)
     setCurrent({ ...saved, saved })
     setResult(saved.transcript)
     setTab(tab)
+    setJump(at)
     setCopied(false)
     setFeedback(saved.transcript.interruption ?? "")
     return tab
@@ -175,6 +192,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     setCurrent(null)
     setResult(EMPTY_TRANSCRIPT)
     setTab("transcript")
+    setJump(undefined)
     setCopied(false)
     setFeedback(feedback)
   }
@@ -182,11 +200,11 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   function openSaved(saved: SavedSession, reopening = true) {
     restoreRequest.current?.abort()
     setRestoring(false)
-    const tab = showSession(saved, reopening ? "overview" : "transcript")
+    const tab = showSession(saved, saved.annotation ? "annotation" : reopening ? "overview" : "transcript")
     writeSessionRoute(saved.id, tab)
   }
 
-  async function openAcceptedSession(id: string) {
+  async function openAcceptedSession(id: string, interruption?: string) {
     nativeCapture.current = false
     nativeStopping.current = false
     nativeSession.current?.abort()
@@ -197,7 +215,10 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     if (!pendingNavigation.current) writeSessionRoute(id, "transcript")
     try {
       const saved = await readSession(id, controller.signal)
-      if (!controller.signal.aborted && !pendingNavigation.current) openSaved(saved, false)
+      if (!controller.signal.aborted && !pendingNavigation.current) {
+        openSaved(saved, false)
+        if (interruption) setFeedback("Saved the audio captured before the recording was interrupted.")
+      }
     } catch (error) {
       if (!controller.signal.aborted) setFeedback(message(error))
     } finally {
@@ -213,7 +234,10 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         if (refusedSource && captureSources(event.mode).includes(refusedSource)) setRefusedSource(null)
         nativeCapture.current = true
         nativeStopping.current = false
+        nativeMeeting.current = !!event.meeting
+        setMeetingStopPending(false)
         setMode(event.mode)
+        if (event.live !== undefined) setLive(event.live)
         setMicrophoneName(event.microphone)
         if (!pendingNavigation.current) writeSessionRoute(null)
         clearSession()
@@ -236,7 +260,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         break
       case "preview":
         if (nativeCapture.current && live && !nativeStopping.current) {
-          setResult({ ...EMPTY_TRANSCRIPT, text: event.text, segments: event.segments ?? [] })
+          setResult({ ...EMPTY_TRANSCRIPT, text: event.text, segments: event.segments ?? [],
+            speakerNames: event.meeting ? meetingSpeakerNames : undefined })
         }
         break
       case "finished":
@@ -245,7 +270,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         if (event.reason && event.reason !== "Stopped") setFeedback(event.reason)
         break
       case "accepted":
-        void openAcceptedSession(event.id)
+        setRecoveredAudio(drafts => drafts.filter(draft => draft.id !== event.id))
+        void openAcceptedSession(event.id, event.interruption)
         break
       case "warning":
         setFeedback(event.message)
@@ -257,9 +283,13 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         if (event.permission) {
           recordingAccess.refused(event.permission)
           setRefusedSource(event.permission)
-          setPermissionGuide("record")
-          setFeedback("")
+          if (!event.meeting) setPermissionGuide("record")
+          setFeedback(event.meeting ? event.message : "")
         } else setFeedback(event.message)
+        if (event.draft) {
+          const draft = { id: event.draft, seconds: elapsed, meeting: !!event.meeting }
+          setRecoveredAudio(existing => existing.some(item => item.id === draft.id) ? existing : [draft, ...existing])
+        }
         break
     }
   })
@@ -268,6 +298,11 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     if (!native) return
     let disposed = false
     const receive = (e: WindowEventMap["jard-capture"]) => receiveCapture(e.detail)
+    const receiveMeeting = (e: WindowEventMap["native-sdk:jard-meetings"]) => {
+      if (!nativeCapture.current || !nativeMeeting.current) return
+      if (e.detail.phase === "saving") setMeetingStopPending(true)
+      else if (e.detail.phase === "recording" || e.detail.phase === "callEnded") setMeetingStopPending(false)
+    }
     const sync = async () => {
       const revision = deviceRevision.current
       try {
@@ -277,10 +312,13 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         setRecoveredAudio(devices.drafts ?? [])
         if (devices.capture && !devices.capture.dictation && !nativeStopping.current) {
           nativeCapture.current = true
+          nativeMeeting.current = !!devices.capture.meeting
+          if (!nativeMeeting.current) setMeetingStopPending(false)
           setMode(devices.capture.mode)
           setLive(devices.capture.live)
           setElapsed(Math.floor(devices.capture.seconds ?? 0))
-          if (devices.capture.text) setResult({ ...EMPTY_TRANSCRIPT, text: devices.capture.text, segments: devices.capture.segments ?? [] })
+          if (devices.capture.text) setResult({ ...EMPTY_TRANSCRIPT, text: devices.capture.text, segments: devices.capture.segments ?? [],
+            speakerNames: devices.capture.meeting ? meetingSpeakerNames : undefined })
           setPhase("recording")
         }
       } catch (error) {
@@ -288,11 +326,13 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       }
     }
     window.addEventListener("jard-capture", receive)
+    window.addEventListener("native-sdk:jard-meetings", receiveMeeting)
     window.addEventListener("focus", sync)
     void sync()
     return () => {
       disposed = true
       window.removeEventListener("jard-capture", receive)
+      window.removeEventListener("native-sdk:jard-meetings", receiveMeeting)
       window.removeEventListener("focus", sync)
       nativeSession.current?.abort()
     }
@@ -310,10 +350,11 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       return
     }
     if (current?.saved?.id === route.id) {
-      const tab = current.saved.status === "complete" ? route.tab : "transcript"
+      const tab = sessionTab(current.saved, route.tab)
       setTab(tab)
+      setJump(route.at)
       setRestoring(false)
-      writeSessionRoute(route.id, tab, true)
+      writeSessionRoute(route.id, tab, true, route.at)
       return
     }
     const controller = new AbortController()
@@ -323,7 +364,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     try {
       const saved = await readSession(route.id, controller.signal)
       if (controller.signal.aborted) return
-      writeSessionRoute(saved.id, showSession(saved, route.tab), true)
+      writeSessionRoute(saved.id, showSession(saved, route.tab, route.at), true, route.at)
     } catch (error) {
       if (controller.signal.aborted) return
       if (error instanceof MissingSessionError) writeSessionRoute(null, "overview", true)
@@ -351,37 +392,65 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       try {
         const response = await fetch("/api/sessions", { signal: controller.signal, cache: "no-store" })
         if (!response.ok) return
-        const rows: Pick<SavedSession, "id">[] = await response.json()
-        if (!controller.signal.aborted && !rows.some(row => row.id === selectedId) && readSessionRoute().id === selectedId) {
+        const rows: Pick<SavedSession, "id" | "audioRemovedAt" | "meetingRetentionDays">[] = await response.json()
+        if (controller.signal.aborted || readSessionRoute().id !== selectedId) return
+        const selected = rows.find(row => row.id === selectedId)
+        if (!selected) {
           clearSession("Session no longer exists.")
           writeSessionRoute(null, "overview", true)
+        } else {
+          if (selected.audioRemovedAt) meetingAudioRemoved(selected.id, selected.audioRemovedAt)
+          setCurrent(previous => {
+            if (!previous?.saved || previous.saved.id !== selectedId || previous.saved.meetingRetentionDays === selected.meetingRetentionDays) return previous
+            return { ...previous, saved: { ...previous.saved, meetingRetentionDays: selected.meetingRetentionDays } }
+          })
         }
       } catch { /* Existing content stays available across a transient disconnect. */ }
     }
     window.addEventListener("focus", checkSelection)
-    return () => { controller.abort(); window.removeEventListener("focus", checkSelection) }
+    window.addEventListener("jard-meeting-retention", checkSelection)
+    return () => {
+      controller.abort()
+      window.removeEventListener("focus", checkSelection)
+      window.removeEventListener("jard-meeting-retention", checkSelection)
+    }
   }, [selectedId, phase])
 
   // A refresh can rejoin an offline transcription after its audio has been accepted.
-  // Poll the small session index and fetch the full transcript once it is ready.
-  const processingId = current?.saved?.status === "processing" ? current.id : null
+  // While a meeting is processing, refresh its readable transcript only when coverage advances.
+  const processingId = current && (current.saved?.status === "processing" || waitingMeeting) ? current.id : null
+  const processingMeeting = !!current?.saved?.meeting
   useEffect(() => {
     if (!processingId || phase !== "idle") return
     const abort = new AbortController()
     let timer: number
+    let processed: number | undefined
+    let lastState: SavedSession["status"] | undefined
     async function poll() {
       try {
         const response = await fetch("/api/sessions", { signal: abort.signal, cache: "no-store" })
         if (response.ok) {
-          const rows: Pick<SavedSession, "id" | "status">[] = await response.json()
+          const rows: (Pick<SavedSession, "id" | "status" | "finalizationPending"> & { processed: number })[] = await response.json()
           const found = rows.find(row => row.id === processingId)
-          if (found?.status !== "processing") {
+          if (!found || (found.status !== "processing" && !found.finalizationPending)) {
             if (abort.signal.aborted || readSessionRoute().id !== processingId) return
             if (found) {
               const saved = await readSession(found.id, abort.signal)
-              if (!abort.signal.aborted && readSessionRoute().id === saved.id) showSession(saved, "transcript")
+              const route = readSessionRoute()
+              if (!abort.signal.aborted && route.id === saved.id) showSession(saved, saved.annotation ? route.tab : "transcript")
             } else { clearSession("Session no longer exists."); writeSessionRoute(null, "overview", true) }
             return
+          }
+          if (processingMeeting && (found.processed !== processed || found.status !== lastState) && readSessionRoute().id === processingId) {
+            const saved = await readSession(found.id, abort.signal)
+            if (!abort.signal.aborted && readSessionRoute().id === saved.id) {
+              if (saved.status !== "processing" && !saved.finalizationPending) { showSession(saved, "transcript"); return }
+              setCurrent({ ...saved, saved })
+              setResult(saved.transcript)
+              setFeedback(saved.transcript.interruption ?? "")
+              processed = found.processed
+              lastState = found.status
+            }
           }
         }
       } catch { if (abort.signal.aborted) return }
@@ -389,11 +458,18 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     }
     timer = window.setTimeout(poll, 1000)
     return () => { abort.abort(); window.clearTimeout(timer) }
-  }, [phase, processingId])
+  }, [phase, processingId, processingMeeting])
 
   function changeTab(tab: string) {
     setTab(tab)
-    if (phase === "idle" && current?.saved?.status === "complete") writeSessionRoute(current.id, tab)
+    setJump(undefined)
+    if (viewingSession && current) writeSessionRoute(current.id, tab)
+  }
+
+  function meetingAudioRemoved(id: string, audioRemovedAt: string) {
+    setCurrent(item => item?.id === id && item.saved ? {
+      ...item, audioUrl: null, saved: { ...item.saved, audioUrl: null, audioPath: null, recordingTracks: undefined, audioRemovedAt },
+    } : item)
   }
 
   async function finishAudio(
@@ -592,7 +668,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   async function copyTranscript() {
     try {
       const text = segments.length
-        ? segments.map((segment) => `${speakerLabel(segment.speaker)}\n${segment.text}`).join("\n\n")
+        ? segments.map((segment) => segment.speaker === null ? segment.text :
+          `${speakerLabel(segment.speaker, result.speakerNames)}\n${segment.text}`).join("\n\n")
         : transcript
       await navigator.clipboard.writeText(text)
       setCopied(true)
@@ -607,7 +684,9 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
   const emptyText = recording
     ? live && !previewPaused ? "Listening for speech…" : "Your transcript will appear when you stop."
     : "Record or open audio."
-  const progressLabel = restoring ? "Opening session…" : processingSavedAudio ? "Transcribing audio…" : preparingModel ? "Loading local models…"
+  const progressLabel = restoring ? "Opening session…" : processingSavedAudio ?
+    (waitingMeeting ? "Waiting to resume meeting transcription…" :
+      processingMeeting && result.transcriptSource === "rolling" ? "Finalizing meeting transcript…" : "Transcribing audio…") : preparingModel ? "Loading local models…"
     : phase === "starting" ? "Waiting for microphone…"
       : processed ? "Transcribing audio…" : "Preparing audio…"
   const progressValue = phase === "transcribing" && processed?.duration && processed.seconds > 0
@@ -627,7 +706,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     </div>
   )
 
-  const viewingSession = phase === "idle" && current?.saved?.status === "complete"
+  const viewingSession = phase === "idle" && (current?.saved?.status === "complete" || Boolean(current?.saved?.annotation))
   function newSession() {
     restoreRequest.current?.abort()
     setRestoring(false)
@@ -636,8 +715,24 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".record-button")?.focus())
   }
 
+  const updateBusy = phase !== "idle" || dictating || choosingFile
   return (
-    <SessionLibrary settings={native && <RecordingAccessSettings native={native} access={recordingAccess} refusedSource={refusedSource} />}
+    <SessionLibrary update={native && <DesktopUpdateControl controls={desktopUpdate} busy={updateBusy} />}
+      openUpdateSettings={desktopUpdate.update?.openUpdateSettings}
+      native={native}
+      dictation={native && ((destination, id) => <SystemDictationWorkspace key={id} destination={destination}
+        controls={systemDictation} native={native} languages={languageOptions} />)}
+      settings={native && {
+        general: <>
+          <DesktopUpdateSettings controls={desktopUpdate} busy={updateBusy} />
+          <DesktopApplicationSettings native={native} />
+          <RecordingAccessSettings native={native} access={recordingAccess} refusedSource={refusedSource} />
+        </>,
+        dictation: <SystemDictationSettings controls={systemDictation} native={native} languages={languageOptions} />,
+        meetings: <DesktopMeetingControls native={native} languages={selectedLanguages.map(language => language.code)} busy={updateBusy} />,
+        annotate: <DesktopAnnotationControls native={native} languages={selectedLanguages.map(language => language.code)}
+          busy={phase !== "idle" || dictating} />,
+      }}
       busy={phase !== "idle" || restoring || dictating} currentId={current?.id}
       onHome={newSession} onSelect={openSaved} onDelete={id => {
         if (current?.id !== id && readSessionRoute().id !== id) return
@@ -646,6 +741,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
         clearSession()
         writeSessionRoute(null, "overview", true)
       }}>
+    {native && <DesktopUpdateFeedback controls={desktopUpdate} busy={updateBusy} />}
+    <SystemDictationTour native={native} controls={systemDictation} modelReady={status === "ready"} modelFailed={status === "error"} />
     <div className="soundfolio-shell" data-session={viewingSession}>
       <header className="soundfolio-header">
         <div className="wordmark">
@@ -656,8 +753,8 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
           <span className="wordmark-text">Jaro</span>
         </div>
         <nav className="workspace-actions" aria-label="Session actions">
-          {viewingSession && <Downloads item={current} compact />}
-          <Button size="sm" variant="ghost" disabled={phase !== "idle" || restoring || dictating} onClick={newSession} title="New session" aria-label="New session"><Plus /><span>New session</span></Button>
+          {viewingSession && <Downloads key={current?.id} item={current} compact onAudioRemoved={meetingAudioRemoved} />}
+          <Button size="sm" variant="ghost" disabled={phase !== "idle" || restoring || dictating} onClick={newSession} title={t("New session")} aria-label={t("New session")}><Plus /><span>{t("New session")}</span></Button>
           <QuitButton recording={recording || phase === "starting" || dictating} onQuit={onQuit} />
         </nav>
       </header>
@@ -665,12 +762,19 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
       <main className="workspace" data-session={viewingSession}>
         <ResultsPanel key={phase === "idle" && current ? current.id : "capture"}
           session={phase === "idle" ? current?.saved : undefined} result={result} source={phase === "idle" && current ? current.audioUrl ?? current.audio ?? null : null}
-          tab={tab} onTab={changeTab} working={working} recording={recording}
+          tab={tab} onTab={changeTab} working={working} recording={recording} followLive={recording && !meetingStopPending} jump={jump}
           dictationEnabled={status === "ready" && phase === "idle" && !choosingFile}
           onDictationBusy={setDictating}
+          onMeetingRenamed={(id, title, meetingExport) => {
+            setCurrent(item => item?.saved?.id === id ? {
+              ...item, name: title, saved: { ...item.saved, name: title, meetingTitle: title, meetingExport },
+            } : item)
+            window.dispatchEvent(new Event("jard-meeting-brief"))
+          }}
           emptyText={emptyText} progress={processingIndicator} copied={copied} onCopy={() => void copyTranscript()} />
 
-        {viewingSession && feedback && <p className="session-feedback feedback" role="alert">{feedback}</p>}
+        {viewingSession && feedback && !(current?.saved?.annotation && feedback === result.interruption) &&
+          <p className="session-feedback feedback" role="alert">{feedback}</p>}
         {!viewingSession && <><div className="controls">
           <div className="control-dock" role="group" aria-label="Audio controls">
             <Button
@@ -680,7 +784,7 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
               onClick={() => void (recording ? stopRecording() : startRecording())}
             >
               {recording ? <Square fill="currentColor" /> : <Mic />}
-              {recording ? "Stop" : "Record"}
+              {recording ? t("Stop") : t("Record")}
             </Button>
             <Button
               variant="ghost"
@@ -759,13 +863,13 @@ function Workspace({ onQuit }: { onQuit: () => void }) {
           {!!recoveredAudio.length && <section className="native-recovery" aria-label="Interrupted recordings">
             {recoveredAudio.map(d => <div className="native-recovery-row" key={d.id}>
               {discarding === d.id ? <>
-                <span>Permanently discard this {clock(d.seconds)} recording?</span>
-                <Button size="sm" variant="ghost" disabled={choosingFile} onClick={() => setDiscarding(null)}>Cancel</Button>
+                <span>Permanently discard this {clock(d.seconds)} {t("recording?")}</span>
+                <Button size="sm" variant="ghost" disabled={choosingFile} onClick={() => setDiscarding(null)}>{t("Cancel")}</Button>
                 <Button size="sm" variant="destructive" disabled={!canStart} onClick={() => void handleRecovery(d.id, true)}>Discard recording</Button>
               </> : <>
-                <span>Interrupted recording · {clock(d.seconds)}</span>
+                <span>{d.meeting ? "Interrupted meeting" : "Interrupted recording"} · {clock(d.seconds)}</span>
                 <Button size="sm" variant="outline" disabled={!canStart} onClick={() => void handleRecovery(d.id, false)}>Recover</Button>
-                <Button size="sm" variant="ghost" disabled={!canStart} onClick={() => setDiscarding(d.id)}>Discard…</Button>
+                <Button size="sm" variant="ghost" disabled={!canStart} onClick={() => setDiscarding(d.id)}>{t("Discard…")}</Button>
               </>}
             </div>)}
           </section>}
